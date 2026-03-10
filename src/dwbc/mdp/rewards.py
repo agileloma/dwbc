@@ -84,6 +84,31 @@ def flat_orientation(
     xy_squared = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
   return torch.exp(-xy_squared / std**2)
 
+def action_rate_l2(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Penalize the rate of change of the actions using L2 squared kernel.
+
+  Operates on raw policy output (before per-term scale/offset).
+  """
+  return torch.sum(
+    torch.square(env.action_manager.action - env.action_manager.prev_action), dim=1
+  )
+
+def joint_pos_limits(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+) -> torch.Tensor:
+  """Penalize joint positions if they cross the soft limits."""
+  asset: Entity = env.scene[asset_cfg.name]
+  soft_joint_pos_limits = asset.data.soft_joint_pos_limits
+  assert soft_joint_pos_limits is not None
+  out_of_limits = -(
+    asset.data.joint_pos[:, asset_cfg.joint_ids]
+    - soft_joint_pos_limits[:, asset_cfg.joint_ids, 0]
+  ).clip(max=0.0)
+  out_of_limits += (
+    asset.data.joint_pos[:, asset_cfg.joint_ids]
+    - soft_joint_pos_limits[:, asset_cfg.joint_ids, 1]
+  ).clip(min=0.0)
+  return torch.sum(out_of_limits, dim=1)
 
 def self_collision_cost(
   env: ManagerBasedRlEnv,
@@ -485,3 +510,117 @@ def track_pose_orientation(
     # 高斯核奖励
     reward = torch.exp(-angle_error * angle_error / (2.0 * std * std))
     return reward
+
+
+def body_ang_vel_penalty(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize excessive body angular velocities (X/Y axes) in body frame."""
+  asset: Entity = env.scene[asset_cfg.name]
+  # 使用本体坐标系（与 dwbc-train 的 ang_vel_xy_l2 一致）
+  ang_vel_b = asset.data.root_link_ang_vel_b[:, :2]
+  return torch.sum(torch.square(ang_vel_b), dim=1)
+
+def joint_deviation_l1(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize joint position deviation from default (L1 norm)."""
+  asset: Entity = env.scene[asset_cfg.name]
+  default_pos = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+  current_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+  return torch.sum(torch.abs(current_pos - default_pos), dim=1)
+
+def base_height_l2(
+  env: ManagerBasedRlEnv,
+  target_height: float,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize base height deviation from target (L2 norm)."""
+  asset: Entity = env.scene[asset_cfg.name]
+  # 添加高度钳制（与 dwbc-train 一致）
+  curr_height = torch.clamp(asset.data.root_link_pos_w[:, 2], max=0.4)
+  return torch.square(curr_height - target_height)
+
+def feet_height_body(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg,
+    target_height: float,
+    tanh_mult: float,
+) -> torch.Tensor:
+    """Reward the swinging feet for clearing a specified height off the ground"""
+    asset: Entity = env.scene[asset_cfg.name]
+    
+    # 计算足端在身体坐标系中的位置
+    # body_pos_w - root_pos_w -> 相对于身体的位置向量（在世界坐标系中）
+    cur_footpos_translated = asset.data.body_com_pos_w[:, asset_cfg.body_ids, :] - asset.data.root_link_pos_w[:, :].unsqueeze(1)
+    
+
+    # 计算足端在身体坐标系中的速度
+    cur_footvel_translated = asset.data.body_com_lin_vel_w[:, asset_cfg.body_ids, :] - asset.data.root_link_lin_vel_w[:, :].unsqueeze(1)
+    
+    # 初始化存储空间
+    footpos_in_body_frame = torch.zeros(env.num_envs, len(asset_cfg.body_ids), 3, device=env.device)
+    footvel_in_body_frame = torch.zeros(env.num_envs, len(asset_cfg.body_ids), 3, device=env.device)
+    
+    # 使用 quat_apply_inverse 将向量从世界坐标系转换到身体坐标系
+    # quat_apply_inverse(quat, vec) 用四元数的逆旋转向量
+    for i in range(len(asset_cfg.body_ids)):
+        footpos_in_body_frame[:, i, :] = quat_apply_inverse(
+            asset.data.root_link_quat_w, 
+            cur_footpos_translated[:, i, :]
+        )
+        footvel_in_body_frame[:, i, :] = quat_apply_inverse(
+            asset.data.root_link_quat_w, 
+            cur_footvel_translated[:, i, :]
+        )
+
+    # 计算足端高度与目标高度的偏差（L2范数）
+    # 身体坐标系中，z轴向上，负值表示在身体下方
+    foot_z_target_error = torch.square(footpos_in_body_frame[:, :, 2] - target_height)
+    
+    # 计算足端水平速度的tanh调制
+    # 使用:2取x,y轴速度（水平方向）
+    foot_velocity_tanh = torch.tanh(tanh_mult * torch.norm(footvel_in_body_frame[:, :, :2], dim=2))
+    
+    # 计算奖励：高度误差 * 速度调制，然后对所有足端求和
+    reward = torch.sum(foot_z_target_error * foot_velocity_tanh, dim=1)
+    
+    # 应用命令条件：只有在有速度指令时才给予奖励
+    command_norm = torch.linalg.norm(env.command_manager.get_command(command_name), dim=1)
+    reward *= (command_norm > 0.1).float()
+    
+    # 应用身体倾斜度调节：考虑机器人倾斜程度
+    # projected_gravity_b[:, 2] 是重力在身体坐标系z轴的分量
+    # 负值表示身体倾斜，取负后正值表示倾斜程度
+    gravity_proj = -env.scene["robot"].data.projected_gravity_b[:, 2]
+    reward *= torch.clamp(gravity_proj, 0.0, 0.7) / 0.7
+    
+    return reward
+
+
+def leg_joint_torques_l2(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+) -> torch.Tensor:
+  """Penalize joint torques applied on the articulation using L2 squared kernel."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return torch.sum(
+    torch.square(asset.data.actuator_force[:, asset_cfg.actuator_ids]), dim=1
+  )
+
+
+def leg_joint_vel_l2(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+) -> torch.Tensor:
+  """Penalize joint velocities on the articulation using L2 squared kernel."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return torch.sum(torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=1)
+
+def leg_joint_acc_l2(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+) -> torch.Tensor:
+  """Penalize joint accelerations on the articulation using L2 squared kernel."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return torch.sum(torch.square(asset.data.joint_acc[:, asset_cfg.joint_ids]), dim=1)

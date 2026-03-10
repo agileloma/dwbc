@@ -124,15 +124,13 @@ INIT_STATE = EntityCfg.InitialStateCfg(
 
   joint_pos={
     # leg
-    ".*L_hip_joint": 0.1,
-    ".*R_hip_joint": -0.1,
-    "F[L,R]_thigh_joint": 0.8,
-    "R[L,R]_thigh_joint": 1.0,
-    ".*_calf_joint": -1.5,
+    ".*thigh_joint": 0.75,
+    ".*calf_joint": -1.5,
+    ".*_hip_joint": 0.,
     # arm
     "joint1": 0.0,      # waist（腰部不转）
-    "joint2": 0.5,      # shoulder（肩抬）
-    "joint3": -1.0,     # elbow（肘弯曲）
+    "joint2": 0.0,      # shoulder（肩抬）
+    "joint3": 0.0,     # elbow（肘弯曲）
     "joint4": 0.0,      # wrist_angle（腕部保持水平）
     "joint5": 0.0,      # forearm_roll（前臂不旋转）
     "joint6": 0.0,      # wrist_rotate（腕部不旋转）

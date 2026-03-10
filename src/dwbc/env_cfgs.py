@@ -22,6 +22,8 @@ from mjlab.managers.termination_manager import TerminationTermCfg
 
 from dwbc import mdp 
 
+from mjlab.sensor.contact_sensor import ContactSensorCfg, ContactMatch
+
 from dwbc.mdp.velocity_command import UniformVelocityCommandCfg
 from dwbc.mdp.pose_command import UniformPoseCommandCfg
 from dwbc.b2z1.b2z1_constants import B2Z1_ACTION_SCALE, get_b2z1_robot_cfg
@@ -32,13 +34,75 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
   ##
   # Scene
   ##
+  
+  FOOT_GEOM_NAMES = ("FL_foot", "FR_foot", "RL_foot", "RR_foot")
+
 
   scene = SceneCfg(
     num_envs=1,
     extent=2.0,
     terrain=TerrainEntityCfg(terrain_type="plane"),
     entities={"robot": get_b2z1_robot_cfg()},
+  #   sensors=(
+  #   ContactSensorCfg(
+  #     name="contact_forces",
+  #     primary=ContactMatch(
+  #       mode="body",
+  #       pattern=("FL_calf", "FR_calf", "RL_calf", "RR_calf"),
+  #       entity="robot",
+  #     ),
+  #     track_air_time=True,
+  #     fields=("found", "force"),
+  #   ),
+  # ),
+       
   )
+
+    # 足端接触传感器（检测脚与地面的接触力，用于计算空中时间）
+  feet_ground_cfg = ContactSensorCfg(
+      name="feet_ground_contact",
+      primary=ContactMatch(
+          mode="geom",
+          pattern=FOOT_GEOM_NAMES,
+          entity="robot",
+      ),
+      secondary=ContactMatch(
+          mode="body",
+          pattern="terrain",   # 地形 body 名称，需与 TerrainEntityCfg 生成的一致，若不确定可改为 None
+      ),
+      fields=("found", "force"),
+      reduce="netforce",       # 每个足部所有接触点的合力
+      num_slots=1,
+      track_air_time=True,     # 开启空气时间追踪
+  )
+
+  # 非足端接触传感器（检测除脚以外的其他部分是否触地）
+  # nonfoot_ground_cfg = ContactSensorCfg(
+  #     name="nonfoot_ground_touch",
+  #     primary=ContactMatch(
+  #         mode="geom",
+  #         entity="robot",
+  #         # 匹配所有碰撞几何体（假设命名规则为 "*_collision" 或以数字结尾）
+  #         # 注：您的 XML 中碰撞几何体可能没有显式名称，此正则可能需要根据实际情况调整
+  #         pattern=r".*_collision\d*$",
+  #         exclude=FOOT_GEOM_NAMES,
+  #     ),
+  #     secondary=ContactMatch(
+  #         mode="body",
+  #         pattern="terrain",
+  #     ),
+  #     fields=("found",),
+  #     reduce="none",
+  #     num_slots=1,
+  # )
+
+  # 将传感器添加到场景的 sensors 元组中
+  # 注意：SceneCfg 需要有 sensors 字段，如果没有则动态创建
+  if not hasattr(scene, "sensors"):
+      scene.sensors = ()
+  scene.sensors += (feet_ground_cfg, )
+      # 将传感器添加到场景，只保留足端传感器
+
 
   viewer = ViewerConfig(
     origin_type=ViewerConfig.OriginType.ASSET_BODY,
@@ -65,47 +129,73 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
   # Observations
   ##
 
+
   actor_terms = {
-    "base_linear_velocity": ObservationTermCfg(
-      func=mdp.builtin_sensor,
-      params={"sensor_name": "robot/imu_lin_vel"},
-    ),
-    "base_angular_velocity": ObservationTermCfg(
-      func=mdp.builtin_sensor,
-      params={"sensor_name": "robot/imu_ang_vel"},
-    ),
-    "projected_gravity": ObservationTermCfg(
-      func=mdp.projected_gravity,
-    ),
-    "joint_positions": ObservationTermCfg(
-      func=mdp.joint_pos_rel,
-    ),
-    "joint_velocities": ObservationTermCfg(
-      func=mdp.joint_vel_rel
-    ),
-    "actions": ObservationTermCfg(
-      func=mdp.last_action,
-    ),
-    "commands": ObservationTermCfg(
-      func=mdp.generated_commands,
-      params={"command_name": "twist"},
-    ),
-    "arm_pose_command": ObservationTermCfg(
-        func=mdp.generated_commands,
-        params={"command_name": "arm_pose"},
-    ),
-    "arm_joint_positions": ObservationTermCfg(
-        func=mdp.joint_pos_rel,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"])}
-    ),
-    "arm_joint_velocities": ObservationTermCfg(
-        func=mdp.joint_vel_rel,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"])}
-    ),
-
-
+      "base_linear_velocity": ObservationTermCfg(
+          func=mdp.builtin_sensor,
+          params={"sensor_name": "robot/imu_lin_vel"},
+      ),
+      "base_angular_velocity": ObservationTermCfg(
+          func=mdp.builtin_sensor,
+          params={"sensor_name": "robot/imu_ang_vel"},
+      ),
+      "projected_gravity": ObservationTermCfg(
+          func=mdp.projected_gravity,
+      ),
+      "leg_joint_positions": ObservationTermCfg(
+          func=mdp.joint_pos_rel,
+          params={
+              "asset_cfg": SceneEntityCfg(
+                  "robot",
+                  joint_names=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint")
+              )
+          },
+      ),
+      "leg_joint_velocities": ObservationTermCfg(
+          func=mdp.joint_vel_rel,
+          params={
+              "asset_cfg": SceneEntityCfg(
+                  "robot",
+                  joint_names=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint")
+              )
+          },
+      ),
+      "actions": ObservationTermCfg(
+          func=mdp.last_action,
+      ),
+      "leg_commands": ObservationTermCfg(
+          func=mdp.generated_commands,
+          params={"command_name": "twist"},
+      ),
+      "arm_pose_command": ObservationTermCfg(
+          func=mdp.generated_commands,
+          params={"command_name": "arm_pose"},
+      ),
+      "arm_joint_positions": ObservationTermCfg(
+          func=mdp.joint_pos_rel,
+          params={
+              "asset_cfg": SceneEntityCfg(
+                  "robot",
+                  joint_names=["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+              )
+          },
+      ),
+      "arm_joint_velocities": ObservationTermCfg(
+          func=mdp.joint_vel_rel,
+          params={
+              "asset_cfg": SceneEntityCfg(
+                  "robot",
+                  joint_names=["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+              )
+          },
+      ),
+      # "foot_contacts": ObservationTermCfg(
+      #     func=mdp.sensor_data,
+      #     params={"sensor_name": "feet_ground_contact", "field": "found"},
+      # ),
   }
-
+  
+  
   critic_terms = {
     **actor_terms,
   }
@@ -165,17 +255,6 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
   ##
   # Commands
   ##
-  # commands: dict[str, CommandTermCfg] = {
-  #   "twist": UniformVelocityCommandCfg(
-  #     entity_name="robot",
-  #     resampling_time_range=(3.0, 8.0),
-  #     ranges=UniformVelocityCommandCfg.Ranges(
-  #       lin_vel_x=(-1.0, 1.0), 
-  #       lin_vel_y=(-1.0, 1.0),
-  #       ang_vel_z=(-1.0, 1.0),
-  #     )
-  #   )
-  # }
 
   commands: dict[str, CommandTermCfg] = {
     # leg
@@ -204,7 +283,6 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
       make_quat_unique=True,               
     ),
   }
-
 
 
   ##
@@ -242,8 +320,98 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
     "joint_limits": RewardTermCfg(
       func=mdp.joint_pos_limits, 
       weight=-1.0,
+      params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*")},
     ),
     
+    # 腿部专用奖励项
+    "body_ang_vel": RewardTermCfg(
+      func=mdp.body_ang_vel_penalty,  
+      weight=-0.02,  
+      params={
+        "asset_cfg": SceneEntityCfg("robot", body_names=("base_link",)),
+      }
+    ),
+
+    "joint_deviation": RewardTermCfg(
+      func=mdp.joint_deviation_l1,  
+      weight=-0.04,
+      params={
+        "asset_cfg": SceneEntityCfg("robot", joint_names=(".*_thigh_joint", ".*_calf_joint")),
+      }
+    ),
+
+
+    "joint_torques":RewardTermCfg(
+      func=mdp.leg_joint_torques_l2,  
+      weight=-2.5e-7,
+       params={
+            "asset_cfg": SceneEntityCfg(
+                "robot", actuator_names=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint")
+            )
+        },
+    ),
+
+
+    "joint_vel": RewardTermCfg(
+        func=mdp.leg_joint_vel_l2,
+        weight=-1e-4,  # 速度惩罚通常比力矩惩罚大一些
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot", joint_names=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint")
+            )
+        },
+    ),
+
+    "joint_acc": RewardTermCfg(
+        func=mdp.leg_joint_acc_l2,
+        weight=-2.5e-7,  # 加速度惩罚通常比速度惩罚小
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot", joint_names=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint")
+            )
+        },
+    ),
+
+    "height_reward": RewardTermCfg(
+      func=mdp.base_height_l2,  
+      weight=-2.0,
+      params={"target_height": 0.5}
+    ),
+
+    "feet_height_body": RewardTermCfg(
+        func=mdp.feet_height_body,
+        weight=-3.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_calf"),
+            "tanh_mult": 2.0,
+            "target_height": -0.5,
+            "command_name": "twist",  
+        },
+    ),
+
+    "feet_air_time": RewardTermCfg(
+        func=mdp.feet_air_time,
+        weight=0.3,
+        params={
+            "sensor_name": "feet_ground_contact",  
+            "threshold_min": 0.1,
+            "threshold_max": 0.3,
+            "command_name": "twist",
+            "command_threshold": 0.5,
+        },
+    ),
+    
+    "feet_slip": RewardTermCfg(
+        func=mdp.feet_slip,
+        weight=-0.2,
+        params={
+            "sensor_name": "feet_ground_contact",
+            "command_name": "twist",
+            "command_threshold": 0.01,
+            "asset_cfg": SceneEntityCfg("robot", site_names=("FL_foot_site", "FR_foot_site", "RL_foot_site", "RR_foot_site")),
+        },
+    ),
+
     # arm
     "track_arm_position": RewardTermCfg(
         func=mdp.track_pose_position,        

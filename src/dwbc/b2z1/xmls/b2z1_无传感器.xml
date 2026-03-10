@@ -133,12 +133,8 @@
             <geom size="0.05 0.01225 0.009" pos="0.022 0 -0.1" quat="0.780707 0 0.624897 0" type="box" rgba="0.7 0.7 0.7 1" class="b2_collision"/>
             <geom size="0.075 0.01225 0.0075" pos="0.036 0 -0.225" quat="0.721382 0 0.692537 0" type="box" rgba="0.7 0.7 0.7 1" class="b2_collision"/>
             <geom size="0.025 0.014 0.0175" pos="0.023 0 -0.31" quat="0.540302 0 0.841471 0" type="box" rgba="0.7 0.7 0.7 1" class="b2_collision"/>
-            <!-- 视觉 mesh (无名称) -->
             <geom pos="0 8.6986e-05 0" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.15 0.15 0.15 1" mesh="FL_foot" friction="0.4 0.005 0.0001"/>
-            <!-- 碰撞球体（添加 name="FL_foot" 用于接触传感器） -->
-            <geom name="FL_foot" size="0.032" pos="0 8.6986e-05 -0.35" quat="0.707388 0.706825 0 0" type="sphere" rgba="0.15 0.15 0.15 1" class="b2_collision" friction="0.4 0.005 0.0001"/>
-            <!-- 足部 site 用于滑移检测 -->
-            <site name="FL_foot_site" pos="0 0 0" type="sphere" size="0.01" group="4" rgba="1 0 0 0.5"/>
+            <geom size="0.032" pos="0 8.6986e-05 -0.35" quat="0.707388 0.706825 0 0" type="sphere" rgba="0.15 0.15 0.15 1" class="b2_collision" friction="0.4 0.005 0.0001"/>
           </body>
         </body>
       </body>
@@ -163,8 +159,7 @@
             <geom size="0.075 0.01225 0.0075" pos="0.036 0 -0.225" quat="0.721382 0 0.692537 0" type="box" rgba="0.7 0.7 0.7 1" class="b2_collision"/>
             <geom size="0.025 0.014 0.0175" pos="0.023 0 -0.31" quat="0.540302 0 0.841471 0" type="box" rgba="0.7 0.7 0.7 1" class="b2_collision"/>
             <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.15 0.15 0.15 1" mesh="FR_foot" friction="0.4 0.005 0.0001"/>
-            <geom name="FR_foot" size="0.032" pos="0 8.6986e-05 -0.35" quat="0.707388 0.706825 0 0" type="sphere" rgba="0.15 0.15 0.15 1" class="b2_collision" friction="0.4 0.005 0.0001"/>
-            <site name="FR_foot_site" pos="0 0 0" type="sphere" size="0.01" group="4" rgba="1 0 0 0.5"/>
+            <geom size="0.032" pos="0 8.6986e-05 -0.35" quat="0.707388 0.706825 0 0" type="sphere" rgba="0.15 0.15 0.15 1" class="b2_collision" friction="0.4 0.005 0.0001"/>
           </body>
         </body>
       </body>
@@ -189,8 +184,7 @@
             <geom size="0.075 0.01225 0.0075" pos="0.036 0 -0.225" quat="0.721382 0 0.692537 0" type="box" rgba="0.7 0.7 0.7 1" class="b2_collision"/>
             <geom size="0.025 0.014 0.0175" pos="0.023 0 -0.31" quat="0.540302 0 0.841471 0" type="box" rgba="0.7 0.7 0.7 1" class="b2_collision"/>
             <geom pos="0 8.6986e-05 0" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.15 0.15 0.15 1" mesh="RL_foot" friction="0.4 0.005 0.0001"/>
-            <geom name="RL_foot" size="0.032" pos="0 8.6986e-05 -0.35" quat="0.707388 0.706825 0 0" type="sphere" rgba="0.15 0.15 0.15 1" class="b2_collision" friction="0.4 0.005 0.0001"/>
-            <site name="RL_foot_site" pos="0 0 0" type="sphere" size="0.01" group="4" rgba="1 0 0 0.5"/>
+            <geom size="0.032" pos="0 8.6986e-05 -0.35" quat="0.707388 0.706825 0 0" type="sphere" rgba="0.15 0.15 0.15 1" class="b2_collision" friction="0.4 0.005 0.0001"/>
           </body>
         </body>
       </body>
@@ -215,8 +209,7 @@
             <geom size="0.075 0.01225 0.0075" pos="0.036 0 -0.225" quat="0.721382 0 0.692537 0" type="box" rgba="0.7 0.7 0.7 1" class="b2_collision"/>
             <geom size="0.025 0.014 0.0175" pos="0.023 0 -0.31" quat="0.540302 0 0.841471 0" type="box" rgba="0.7 0.7 0.7 1" class="b2_collision"/>
             <geom pos="0 -8.6984e-05 0" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.15 0.15 0.15 1" mesh="RR_foot" friction="0.4 0.005 0.0001"/>
-            <geom name="RR_foot" size="0.032" pos="0 8.6986e-05 -0.35" quat="0.707388 0.706825 0 0" type="sphere" rgba="0.15 0.15 0.15 1" class="b2_collision" friction="0.4 0.005 0.0001"/>
-            <site name="RR_foot_site" pos="0 0 0" type="sphere" size="0.01" group="4" rgba="1 0 0 0.5"/>
+            <geom size="0.032" pos="0 8.6986e-05 -0.35" quat="0.707388 0.706825 0 0" type="sphere" rgba="0.15 0.15 0.15 1" class="b2_collision" friction="0.4 0.005 0.0001"/>
           </body>
         </body>
       </body>
@@ -300,6 +293,7 @@
     <velocimeter name="imu_lin_vel" site="imu"/>
     <accelerometer name="imu_lin_acc" site="imu"/>
     <subtreeangmom name="root_angmom" body="base_link"/>
+    <!-- 添加subtreeangmom该传感器将输出一个三维向量，即整个机器人（基座及所有关节和肢体）的总角动量，可用于分析机器人整体旋转状态或作为强化学习的观测输入。 -->
   </sensor>
 
   <keyframe>
