@@ -281,32 +281,6 @@
     </body>
   </worldbody>
 
-  <actuator>
-    <!-- <position name="FL_hip" joint="FL_hip_joint" kp="100" dampratio="1"/>
-    <position name="FL_thigh" joint="FL_thigh_joint" kp="100" dampratio="1"/>
-    <position name="FL_calf" joint="FL_calf_joint" kp="100" dampratio="1"/>
-    <position name="FR_hip" joint="FR_hip_joint" kp="100" dampratio="1"/>
-    <position name="FR_thigh" joint="FR_thigh_joint" kp="100" dampratio="1"/>
-    <position name="FR_calf" joint="FR_calf_joint" kp="100" dampratio="1"/>
-    <position name="RL_hip" joint="RL_hip_joint" kp="100" dampratio="1"/>
-    <position name="RL_thigh" joint="RL_thigh_joint" kp="100" dampratio="1"/>
-    <position name="RL_calf" joint="RL_calf_joint" kp="100" dampratio="1"/>
-    <position name="RR_hip" joint="RR_hip_joint" kp="100" dampratio="1"/>
-    <position name="RR_thigh" joint="RR_thigh_joint" kp="100" dampratio="1"/>
-    <position name="RR_calf" joint="RR_calf_joint" kp="100" dampratio="1"/>  -->
-
-    <!-- ARM-->
-    <position name="arm_joint1" joint="joint1" kp="100" dampratio="1"/>
-    <position name="arm_joint2" joint="joint2" kp="100" dampratio="1"/>
-    <position name="arm_joint3" joint="joint3" kp="100" dampratio="1"/>
-    <position name="arm_joint4" joint="joint4" kp="100" dampratio="1"/>
-    <position name="arm_joint5" joint="joint5" kp="100" dampratio="1"/>
-    <position name="arm_joint6" joint="joint6" kp="100" dampratio="1"/>
-
-    <!-- gripper -->
-    <!-- <position name="gripper" joint="jointGripper" kp="100" dampratio="1"/> -->
-</actuator>
-
   <contact>
     <exclude body1="base_link" body2="FL_thigh"/>
     <exclude body1="base_link" body2="FR_thigh"/>

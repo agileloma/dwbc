@@ -126,19 +126,41 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
   ##
   # Actions
   ##
+  # actions: dict[str, ActionTermCfg] = {
+  #   "joint_positions": JointPositionActionCfg(
+  #     entity_name="robot",
+  #     actuator_names=(".*",),
+  #     scale=B2Z1_ACTION_SCALE,
+  #     # scale=0.5,  # Override per-robot.
+  #     use_default_offset=True,
+  #   )
+  # }
+
   actions: dict[str, ActionTermCfg] = {
     "joint_positions": JointPositionActionCfg(
-      entity_name="robot",
-      actuator_names=(".*",),
-      # scale=B2Z1_ACTION_SCALE,
-      scale=0.5,  # Override per-robot.
-      use_default_offset=True,
+        entity_name="robot",
+        actuator_names=(
+            "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
+            "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
+            "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
+            "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
+            "joint1", "joint2", "joint3", "joint4", "joint5", "joint6", 
+        ),
+        scale={
+            # 保留腿部的自动缩放（或手动指定）
+            ".*_hip_joint": 0.25 * 200 / 250,   # 示例值
+            ".*_thigh_joint": 0.25 * 200 / 250,
+            ".*_calf_joint": 0.25 * 320 / 300,
+            # 臂关节手动指定较大值
+            "joint[1-6]": 0.5,   # 直接设为 0.5 弧度
+        },
+        use_default_offset=True,
     )
-  }
+  } 
 
   joint_pos_action = actions["joint_positions"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
-  joint_pos_action.scale = B2Z1_ACTION_SCALE
+  # joint_pos_action.scale = B2Z1_ACTION_SCALE
 
   ##
   # Commands
