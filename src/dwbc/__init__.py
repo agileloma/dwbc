@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from mjlab.tasks.registry import register_mjlab_task
-from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
+from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner # TODO
 
 from dwbc.env_cfgs import make_b2z1_flat_env_cfg
 from dwbc.rl_cfg import b2z1_ppo_runner_cfg

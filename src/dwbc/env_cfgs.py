@@ -20,9 +20,10 @@ from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 
-from mjlab.tasks.velocity import mdp
-from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
+from dwbc import mdp 
 
+from dwbc.mdp.velocity_command import UniformVelocityCommandCfg
+from dwbc.mdp.pose_command import UniformPoseCommandCfg
 from dwbc.b2z1.b2z1_constants import B2Z1_ACTION_SCALE, get_b2z1_robot_cfg
 
 def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
@@ -88,7 +89,21 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
     "commands": ObservationTermCfg(
       func=mdp.generated_commands,
       params={"command_name": "twist"},
-    )
+    ),
+    "arm_pose_command": ObservationTermCfg(
+        func=mdp.generated_commands,
+        params={"command_name": "arm_pose"},
+    ),
+    "arm_joint_positions": ObservationTermCfg(
+        func=mdp.joint_pos_rel,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"])}
+    ),
+    "arm_joint_velocities": ObservationTermCfg(
+        func=mdp.joint_vel_rel,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"])}
+    ),
+
+
   }
 
   critic_terms = {
@@ -115,15 +130,33 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
     "joint_positions": JointPositionActionCfg(
       entity_name="robot",
       actuator_names=(".*",),
-      scale=B2Z1_ACTION_SCALE,
+      # scale=B2Z1_ACTION_SCALE,
+      scale=0.5,  # Override per-robot.
       use_default_offset=True,
     )
   }
 
+  joint_pos_action = actions["joint_positions"]
+  assert isinstance(joint_pos_action, JointPositionActionCfg)
+  joint_pos_action.scale = B2Z1_ACTION_SCALE
+
   ##
   # Commands
   ##
+  # commands: dict[str, CommandTermCfg] = {
+  #   "twist": UniformVelocityCommandCfg(
+  #     entity_name="robot",
+  #     resampling_time_range=(3.0, 8.0),
+  #     ranges=UniformVelocityCommandCfg.Ranges(
+  #       lin_vel_x=(-1.0, 1.0), 
+  #       lin_vel_y=(-1.0, 1.0),
+  #       ang_vel_z=(-1.0, 1.0),
+  #     )
+  #   )
+  # }
+
   commands: dict[str, CommandTermCfg] = {
+    # leg
     "twist": UniformVelocityCommandCfg(
       entity_name="robot",
       resampling_time_range=(3.0, 8.0),
@@ -132,8 +165,25 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
         lin_vel_y=(-1.0, 1.0),
         ang_vel_z=(-1.0, 1.0),
       )
-    )
+    ),  
+    # arm
+    "arm_pose": UniformPoseCommandCfg(      
+      entity_name="robot",
+      body_name="link06",          
+      resampling_time_range=(3.0, 8.0),      
+      ranges=UniformPoseCommandCfg.Ranges(
+            pos_x=(0.2, 0.6),               
+            pos_y=(-0.3, 0.3),               
+            pos_z=(0.0, 0.4),                
+            roll=(-0.5, 0.5),              
+            pitch=(-0.5, 1.0),           
+            yaw=(-1.0, 1.0),                    
+      ),
+      make_quat_unique=True,               
+    ),
   }
+
+
 
   ##
   # Rewards
@@ -170,8 +220,32 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
     "joint_limits": RewardTermCfg(
       func=mdp.joint_pos_limits, 
       weight=-1.0,
-    )
+    ),
+    
+    # arm
+    "track_arm_position": RewardTermCfg(
+        func=mdp.track_pose_position,        
+        weight=1.0,
+        params={
+            "command_name": "arm_pose",
+            "asset_cfg": SceneEntityCfg("robot", body_names="link06"),
+            "std": 0.1,                    
+        }
+    ),
+    "track_arm_orientation": RewardTermCfg(
+        func=mdp.track_pose_orientation,      
+        weight=0.5,
+        params={
+            "command_name": "arm_pose",
+            "asset_cfg": SceneEntityCfg("robot", body_names="link06"),
+            "std": 0.2,
+        }
+    ),
   }
+
+  ##
+  # Events
+  ##
 
   ##
   # Terminations
