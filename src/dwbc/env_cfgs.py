@@ -262,9 +262,14 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
       entity_name="robot",
       resampling_time_range=(3.0, 8.0),
       ranges=UniformVelocityCommandCfg.Ranges(
-        lin_vel_x=(-1.0, 1.0), 
-        lin_vel_y=(-1.0, 1.0),
-        ang_vel_z=(-1.0, 1.0),
+        
+        # lin_vel_x=(-1.0, 1.0), 
+        # lin_vel_y=(-1.0, 1.0),
+        # ang_vel_z=(-1.0, 1.0),
+        
+        lin_vel_x=(-0.5, 0.5), 
+        lin_vel_y=(-0.5, 0.5),
+        ang_vel_z=(-0.5, 0.5),
       )
     ),  
     # arm
@@ -325,49 +330,52 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
     
     # 腿部专用奖励项
     "body_ang_vel": RewardTermCfg(
-      func=mdp.body_ang_vel_penalty,  
+      func=mdp.body_angular_velocity_penalty,  
       weight=-0.02,  
       params={
         "asset_cfg": SceneEntityCfg("robot", body_names=("base_link",)),
       }
     ),
 
-    "joint_deviation": RewardTermCfg(
+    "leg_joint_deviation": RewardTermCfg(
       func=mdp.joint_deviation_l1,  
-      weight=-0.04,
+      weight=-0.03,
       params={
         "asset_cfg": SceneEntityCfg("robot", joint_names=(".*_thigh_joint", ".*_calf_joint")),
       }
     ),
 
 
-    "joint_torques":RewardTermCfg(
-      func=mdp.leg_joint_torques_l2,  
+    "leg_joint_torques":RewardTermCfg(
+      func=mdp.joint_torques_l2,  
       weight=-2.5e-7,
        params={
             "asset_cfg": SceneEntityCfg(
-                "robot", actuator_names=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint")
+                "robot", 
+                actuator_names=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint")
             )
         },
     ),
 
 
-    "joint_vel": RewardTermCfg(
-        func=mdp.leg_joint_vel_l2,
+    "leg_joint_vel": RewardTermCfg(
+        func=mdp.joint_vel_l2,
         weight=-1e-4,  # 速度惩罚通常比力矩惩罚大一些
         params={
             "asset_cfg": SceneEntityCfg(
-                "robot", joint_names=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint")
+                "robot", 
+                joint_names=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint")
             )
         },
     ),
 
-    "joint_acc": RewardTermCfg(
-        func=mdp.leg_joint_acc_l2,
-        weight=-2.5e-7,  # 加速度惩罚通常比速度惩罚小
+    "leg_joint_acc": RewardTermCfg(
+        func=mdp.joint_acc_l2,
+        weight=-1.0e-6,#-2.5e-7,  # 加速度惩罚通常比速度惩罚小
         params={
             "asset_cfg": SceneEntityCfg(
-                "robot", joint_names=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint")
+                "robot", 
+                joint_names=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint")
             )
         },
     ),
@@ -380,7 +388,7 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
 
     "feet_height_body": RewardTermCfg(
         func=mdp.feet_height_body,
-        weight=-3.0,
+        weight=-1.0,#-3.0,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_calf"),
             "tanh_mult": 2.0,
@@ -391,7 +399,7 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
 
     "feet_air_time": RewardTermCfg(
         func=mdp.feet_air_time,
-        weight=0.3,
+        weight=0.5, #0.3,
         params={
             "sensor_name": "feet_ground_contact",  
             "threshold_min": 0.1,
@@ -403,7 +411,7 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
     
     "feet_slip": RewardTermCfg(
         func=mdp.feet_slip,
-        weight=-0.2,
+        weight=-0.1, #-0.2,
         params={
             "sensor_name": "feet_ground_contact",
             "command_name": "twist",
@@ -431,7 +439,83 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
             "std": 0.2,
         }
     ),
+    
+    "end_effector_action_rate": RewardTermCfg(
+      func=mdp.action_rate_l2, 
+      weight=-0.01,
+    ),
+        # ===== 机械臂关节偏差惩罚 =====
+        # 机械臂的关节偏差惩罚（负权重，但比腿部更严格）
+    "arm_joint_deviation": RewardTermCfg(
+        func=mdp.joint_deviation_l1,
+        weight=-0.05,#-0.08,  # 机械臂需要更精确的位置控制，权重更高
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=(
+                    "joint1",  # 腰部
+                    "joint2",  # 肩关节
+                    "joint3",  # 肘关节
+                    "joint4",  # 腕部角度
+                    "joint5",  # 前臂旋转
+                    "joint6",  # 腕部旋转
+                    # "jointGripper",  # 夹爪（如果需要）
+                )
+            )
+        },
+    ),
+
+    # ===== 机械臂关节惩罚 =====
+    # 机械臂关节力矩惩罚
+    "arm_joint_torques": RewardTermCfg(
+        func=mdp.joint_torques_l2,
+        weight=-5.0e-7,#-2.0e-6,#-5.0e-7,  # 机械臂需要更精确的力矩控制，权重提高2倍
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=(
+                    "joint1", "joint2", "joint3",
+                    "joint4", "joint5", "joint6"
+                )
+            )
+        },
+    ),
+    
+    # 机械臂关节速度惩罚
+    "arm_joint_vel": RewardTermCfg(
+        func=mdp.joint_vel_l2,
+        weight=-2e-4,  # 机械臂速度控制更重要，权重提高2倍
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=(
+                    "joint1", "joint2", "joint3",
+                    "joint4", "joint5", "joint6"
+                )
+            )
+        },
+    ),
+  
+    # 机械臂关节加速度惩罚
+    "arm_joint_acc": RewardTermCfg(
+        func=mdp.joint_acc_l2,
+        weight=-2.0e-6,#-2.0e-5,#-5.0e-7,  # 机械臂加速度控制更重要，权重提高2倍
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=(
+                    "joint1", "joint2", "joint3",
+                    "joint4", "joint5", "joint6"
+                )
+            )
+        },
+    ),
+
+
   }
+
+
+
 
   ##
   # Events

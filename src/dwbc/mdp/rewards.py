@@ -132,18 +132,6 @@ def self_collision_cost(
   return data.found.squeeze(-1)
 
 
-def body_angular_velocity_penalty(
-  env: ManagerBasedRlEnv,
-  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-  """Penalize excessive body angular velocities."""
-  asset: Entity = env.scene[asset_cfg.name]
-  ang_vel = asset.data.body_link_ang_vel_w[:, asset_cfg.body_ids, :]
-  ang_vel = ang_vel.squeeze(1)
-  ang_vel_xy = ang_vel[:, :2]  # Don't penalize z-angular velocity.
-  return torch.sum(torch.square(ang_vel_xy), dim=1)
-
-
 def angular_momentum_penalty(
   env: ManagerBasedRlEnv,
   sensor_name: str,
@@ -512,15 +500,7 @@ def track_pose_orientation(
     return reward
 
 
-def body_ang_vel_penalty(
-  env: ManagerBasedRlEnv,
-  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-  """Penalize excessive body angular velocities (X/Y axes) in body frame."""
-  asset: Entity = env.scene[asset_cfg.name]
-  # 使用本体坐标系（与 dwbc-train 的 ang_vel_xy_l2 一致）
-  ang_vel_b = asset.data.root_link_ang_vel_b[:, :2]
-  return torch.sum(torch.square(ang_vel_b), dim=1)
+
 
 def joint_deviation_l1(
   env: ManagerBasedRlEnv,
@@ -601,7 +581,7 @@ def feet_height_body(
     return reward
 
 
-def leg_joint_torques_l2(
+def joint_torques_l2(
   env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
 ) -> torch.Tensor:
   """Penalize joint torques applied on the articulation using L2 squared kernel."""
@@ -611,16 +591,28 @@ def leg_joint_torques_l2(
   )
 
 
-def leg_joint_vel_l2(
+def joint_vel_l2(
   env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
 ) -> torch.Tensor:
   """Penalize joint velocities on the articulation using L2 squared kernel."""
   asset: Entity = env.scene[asset_cfg.name]
   return torch.sum(torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=1)
 
-def leg_joint_acc_l2(
+def joint_acc_l2(
   env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
 ) -> torch.Tensor:
   """Penalize joint accelerations on the articulation using L2 squared kernel."""
   asset: Entity = env.scene[asset_cfg.name]
   return torch.sum(torch.square(asset.data.joint_acc[:, asset_cfg.joint_ids]), dim=1)
+
+
+def body_angular_velocity_penalty(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize excessive body angular velocities."""
+  asset: Entity = env.scene[asset_cfg.name]
+  ang_vel = asset.data.body_link_ang_vel_w[:, asset_cfg.body_ids, :]
+  ang_vel = ang_vel.squeeze(1)
+  ang_vel_xy = ang_vel[:, :2]  # Don't penalize z-angular velocity.
+  return torch.sum(torch.square(ang_vel_xy), dim=1)
