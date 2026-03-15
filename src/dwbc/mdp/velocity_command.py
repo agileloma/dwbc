@@ -43,6 +43,13 @@ class UniformVelocityCommand(CommandTerm):
     )
     self.is_standing_env = torch.zeros_like(self.is_heading_env)
 
+    if hasattr(self.cfg, 'curriculum_coeff') and self.cfg.curriculum_coeff is not None:
+        # 直接使用基础配置
+        from dwbc.rl_cfg import b2z1_ppo_runner_cfg
+        cfg_runner = b2z1_ppo_runner_cfg()
+        self.num_env_step = cfg_runner.num_steps_per_env  # 24
+        # 先不考虑粗糙地形
+
     self.metrics["error_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
     self.metrics["error_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
 
@@ -71,9 +78,29 @@ class UniformVelocityCommand(CommandTerm):
 
   def _resample_command(self, env_ids: torch.Tensor) -> None:
     r = torch.empty(len(env_ids), device=self.device)
-    self.vel_command_b[env_ids, 0] = r.uniform_(*self.cfg.ranges.lin_vel_x)
-    self.vel_command_b[env_ids, 1] = r.uniform_(*self.cfg.ranges.lin_vel_y)
-    self.vel_command_b[env_ids, 2] = r.uniform_(*self.cfg.ranges.ang_vel_z)
+
+    # B2Z1 训练模式（带课程学习）
+    if hasattr(self.cfg, 'is_B2Z1') and self.cfg.is_B2Z1:
+        # 课程学习进度计算
+        count = torch.tensor(
+            self._env.common_step_counter / self.num_env_step / self.cfg.curriculum_coeff,
+            device=self.device
+        )
+        count = torch.clamp(count, 0, 1)  # 确保在 [0,1] 范围内
+
+        self.vel_command_b[env_ids, 0] = (r.uniform_(*self.cfg.ranges_init.lin_vel_x)) * torch.clamp((1 - count), 0, 1) + (r.uniform_(*self.cfg.ranges_final.lin_vel_x)) * torch.clamp(count, 0, 1)
+        self.vel_command_b[env_ids, 1] = (r.uniform_(*self.cfg.ranges_init.lin_vel_y)) * torch.clamp((1 - count), 0, 1) + (r.uniform_(*self.cfg.ranges_final.lin_vel_y)) * torch.clamp(count, 0, 1)
+        self.vel_command_b[env_ids, 2] = (r.uniform_(*self.cfg.ranges_init.ang_vel_z)) * torch.clamp((1 - count), 0, 1) + (r.uniform_(*self.cfg.ranges_final.ang_vel_z)) * torch.clamp(count, 0, 1)
+
+    else:
+        self.vel_command_b[env_ids, 0] = r.uniform_(*self.cfg.ranges.lin_vel_x)
+        self.vel_command_b[env_ids, 1] = r.uniform_(*self.cfg.ranges.lin_vel_y)
+        self.vel_command_b[env_ids, 2] = r.uniform_(*self.cfg.ranges.ang_vel_z) 
+
+    # self.vel_command_b[env_ids, 0] = r.uniform_(*self.cfg.ranges.lin_vel_x)
+    # self.vel_command_b[env_ids, 1] = r.uniform_(*self.cfg.ranges.lin_vel_y)
+    # self.vel_command_b[env_ids, 2] = r.uniform_(*self.cfg.ranges.ang_vel_z)
+
     if self.cfg.heading_command:
       assert self.cfg.ranges.heading is not None
       self.heading_target[env_ids] = r.uniform_(*self.cfg.ranges.heading)
@@ -94,7 +121,7 @@ class UniformVelocityCommand(CommandTerm):
         [root_pos, root_quat, root_lin_vel_w, root_ang_vel_b], dim=-1
       )
       self.robot.write_root_state_to_sim(root_state, init_vel_env_ids)
-
+  
   def _update_command(self) -> None:
     if self.cfg.heading_command:
       self.heading_error = wrap_to_pi(self.heading_target - self.robot.data.heading_w)
@@ -263,6 +290,44 @@ class UniformVelocityCommandCfg(CommandTermCfg):
 
   ranges: Ranges
 
+  # ===== 新增 B2Z1 相关参数 =====
+
+  is_B2Z1: bool = False
+  """B2Z1 标志。
+  启用 B2Z1 特有的课程学习和智能姿态计算。
+  对应原代码的 is_Go2ARM。
+  """
+  
+  is_B2Z1_Play: bool = False
+  """B2Z1 测试模式标志。
+  启用固定范围采样，无课程学习。
+  对应原代码的 is_Go2ARM_Play。
+  """
+  
+  is_B2Z1_Flat: bool = True
+  """B2Z1 平坦地形标志。
+  用于区分平坦/粗糙地形的训练配置。
+  对应原代码的 is_Go2ARM_Flat。
+  """
+  
+  curriculum_coeff: int = None
+  """课程学习系数。
+  控制从初始范围到最终范围的过渡速度。
+  数值越大，过渡越慢。
+  对应原代码的 curriculum_coeff。
+  """
+  
+  ranges_init: Ranges = None
+  """初始训练范围。
+  训练初期使用的较小范围。
+  对应原代码的 ranges_init。
+  """
+  
+  ranges_final: Ranges = None
+  """最终训练范围。
+  训练后期使用的完整范围。
+  对应原代码的 ranges_final。
+  """
   @dataclass
   class VizCfg:
     z_offset: float = 0.2

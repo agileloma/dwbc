@@ -83,9 +83,24 @@ class UniformPoseCommand(CommandTerm):
         # 世界坐标系下的命令位姿（用于度量）
         self.pose_command_w = torch.zeros_like(self.pose_command_b)
 
+        # ===== 新增：世界坐标系下的 z 轴高度缓冲区 =====
+        self.pose_command_w_z = torch.zeros(self.num_envs, 1, device=self.device)
+        """World frame z-coordinate for B2Z1 pose commands."""
+
         # 度量
         self.metrics["position_error"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["orientation_error"] = torch.zeros(self.num_envs, device=self.device)
+
+        # 保存环境引用和训练步数相关参数
+        self.env = env
+        # self.num_env_step = 24  # 默认值
+
+        if hasattr(self.cfg, 'curriculum_coeff') and self.cfg.curriculum_coeff is not None:
+            # 直接使用基础配置
+            from dwbc.rl_cfg import b2z1_ppo_runner_cfg
+            cfg_runner = b2z1_ppo_runner_cfg()
+            self.num_env_step = cfg_runner.num_steps_per_env  # 24
+            # 先不考虑粗糙地形
 
         # GUI 相关
         self._gui_enabled: viser.GuiCheckboxHandle | None = None
@@ -111,6 +126,14 @@ class UniformPoseCommand(CommandTerm):
         rot_mat = matrix_from_quat(root_quat)  # (num_envs, 3, 3)
         world_pos = root_pos + torch.einsum('nij,nj->ni', rot_mat, local_pos)
         world_quat = quat_mul(root_quat, local_quat)
+       
+        # B2Z1 特殊处理：如果启用，使用世界坐标系下的 z 高度
+        if hasattr(self.cfg, 'is_B2Z1') and self.cfg.is_B2Z1:
+            # 对于 B2Z1，使用预先存储的世界坐标系 z 高度
+            world_pos[:, 2] = self.pose_command_w_z[:, 0]
+            # 重新计算局部 z 坐标（用于后续可能的计算）
+            self.pose_command_b[:, 2] = self.pose_command_w_z[:, 0] - root_pos[:, 2]
+
         self.pose_command_w = torch.cat([world_pos, world_quat], dim=-1)
 
         # 当前身体在世界坐标系下的位姿
@@ -133,29 +156,179 @@ class UniformPoseCommand(CommandTerm):
         if len(env_ids) == 0:
             return
 
+        # 初始化变量
+        euler_angles = torch.zeros_like(self.pose_command_b[env_ids, :3])
         r = torch.empty(len(env_ids), device=self.device)
+        r_1 = torch.empty(1, device=self.device)
 
-        # 采样位置
-        self.pose_command_b[env_ids, 0] = r.uniform_(*self.cfg.ranges.pos_x)
-        self.pose_command_b[env_ids, 1] = r.uniform_(*self.cfg.ranges.pos_y)
-        self.pose_command_b[env_ids, 2] = r.uniform_(*self.cfg.ranges.pos_z)
+        # B2Z1 训练模式（带课程学习）
+        if hasattr(self.cfg, 'is_B2Z1') and self.cfg.is_B2Z1:
+            # 课程学习进度计算
+            count = torch.tensor(
+                self.env.common_step_counter / self.num_env_step / self.cfg.curriculum_coeff,
+                device=self.device
+            )
+            count = torch.clamp(count, 0, 1)  # 确保在 [0,1] 范围内
 
-        # 采样欧拉角
-        euler = torch.zeros(len(env_ids), 3, device=self.device)
-        euler[:, 0] = r.uniform_(*self.cfg.ranges.roll)
-        euler[:, 1] = r.uniform_(*self.cfg.ranges.pitch)
-        euler[:, 2] = r.uniform_(*self.cfg.ranges.yaw)
+            # 位置采样（课程学习）- x, y 在基座坐标系
+            self.pose_command_b[env_ids, 0] = (
+                r.uniform_(*self.cfg.ranges_init.pos_x) * (1 - count) +
+                r.uniform_(*self.cfg.ranges_final.pos_x) * count
+            )
+            self.pose_command_b[env_ids, 1] = (
+                r.uniform_(*self.cfg.ranges_init.pos_y) * (1 - count) +
+                r.uniform_(*self.cfg.ranges_final.pos_y) * count
+            )
+            
+            # z 坐标在世界坐标系采样，然后转换
+            self.pose_command_w_z[env_ids, 0] = (
+                r.uniform_(*self.cfg.ranges_init.pos_z) * (1 - count) +
+                r.uniform_(*self.cfg.ranges_final.pos_z) * count
+            )
+            self.pose_command_b[env_ids, 2] = (
+                self.pose_command_w_z[env_ids, 0] - self.robot.data.root_link_pos_w[env_ids, 2]
+            )
 
-        # 转换为四元数
-        quat = quat_from_euler_xyz(euler[:, 0], euler[:, 1], euler[:, 2])
+            # 可达性检查和重采样
+            for i_idx, env_id in enumerate(env_ids):
+                # 计算臂长（末端到基座的距离）
+                length_arm = torch.norm(torch.stack([
+                    self.pose_command_b[env_id, 0],
+                    self.pose_command_b[env_id, 1],
+                    self.pose_command_b[env_id, 2]
+                ]))
+                
+
+                # # 获取当前位姿
+                # x = self.pose_command_b[env_id, 0]
+                # y = self.pose_command_b[env_id, 1]
+                # z = self.pose_command_w_z[env_id, 0]
+
+
+
+                # 检查是否在可达范围内
+                while ((length_arm > 0.7) or (length_arm < 0.3) or 
+                       (self.pose_command_b[env_id, 0] < 0.45 and 
+                        torch.abs(self.pose_command_b[env_id, 1]) < 0.2)):
+                    
+
+                # # 检查是否安全
+                # while not self._is_pose_safe(x, y, z, length_arm):
+
+                    # 重采样
+                    self.pose_command_b[env_id, 0] = (
+                        r_1.uniform_(*self.cfg.ranges_init.pos_x) * (1 - count) +
+                        r_1.uniform_(*self.cfg.ranges_final.pos_x) * count
+                    )
+                    self.pose_command_b[env_id, 1] = (
+                        r_1.uniform_(*self.cfg.ranges_init.pos_y) * (1 - count) +
+                        r_1.uniform_(*self.cfg.ranges_final.pos_y) * count
+                    )
+                    self.pose_command_w_z[env_id, 0] = (
+                        r_1.uniform_(*self.cfg.ranges_init.pos_z) * (1 - count) +
+                        r_1.uniform_(*self.cfg.ranges_final.pos_z) * count
+                    )
+                    self.pose_command_b[env_id, 2] = (
+                        self.pose_command_w_z[env_id, 0] - self.robot.data.root_link_pos_w[env_id, 2]
+                    )
+                    
+                    # 更新参数
+                    x = self.pose_command_b[env_id, 0]
+                    y = self.pose_command_b[env_id, 1]
+                    z = self.pose_command_w_z[env_id, 0]
+
+
+                    # 重新计算臂长
+                    length_arm = torch.norm(torch.stack([
+                        self.pose_command_b[env_id, 0],
+                        self.pose_command_b[env_id, 1],
+                        self.pose_command_b[env_id, 2]
+                    ]))
+
+            # 横滚角采样（通常设为0或小范围）
+            euler_angles[:, 0] = (
+                r.uniform_(*self.cfg.ranges_init.roll) * (1 - count) +
+                r.uniform_(*self.cfg.ranges_final.roll) * count
+            )
+
+            # 获取位置偏移量用于智能姿态计算
+            delta_x = self.pose_command_b[env_ids, 0]
+            delta_y = self.pose_command_b[env_ids, 1]
+            delta_z = self.pose_command_b[env_ids, 2]
+
+            # 俯仰角：基础角度（指向目标） + 随机扰动
+            euler_angles[:, 1] = (
+                -torch.atan2(delta_z, torch.sqrt(delta_x**2 + delta_y**2)) +
+                r.uniform_(*self.cfg.ranges.pitch) * (1 - count) +
+                r.uniform_(*self.cfg.ranges_final.pitch) * count
+            )
+
+            # 偏航角：基础角度（指向目标） + 随机扰动
+            euler_angles[:, 2] = (
+                torch.atan2(delta_y, delta_x) +
+                r.uniform_(*self.cfg.ranges_init.yaw) * (1 - count) +
+                r.uniform_(*self.cfg.ranges_final.yaw) * count
+            )
+
+
+        # B2Z1 测试/部署模式
+        elif hasattr(self.cfg, 'is_B2Z1_Play') and self.cfg.is_B2Z1_Play:
+            # 固定范围采样，无课程学习
+            self.pose_command_b[env_ids, 0] = r.uniform_(*self.cfg.ranges.pos_x)
+            self.pose_command_b[env_ids, 1] = r.uniform_(*self.cfg.ranges.pos_y)
+            
+            # z 坐标在世界坐标系采样
+            self.pose_command_w_z[env_ids, 0] = r.uniform_(*self.cfg.ranges.pos_z)
+            self.pose_command_b[env_ids, 2] = (
+                self.pose_command_w_z[env_ids, 0] - self.robot.data.root_link_pos_w[env_ids, 2]
+            )
+
+            # 智能姿态计算
+            delta_x = self.pose_command_b[env_ids, 0]
+            delta_y = self.pose_command_b[env_ids, 1]
+            delta_z = self.pose_command_b[env_ids, 2]
+
+            euler_angles[:, 0] = r.uniform_(*self.cfg.ranges.roll)
+            euler_angles[:, 1] = (
+                -torch.atan2(delta_z, torch.sqrt(delta_x**2 + delta_y**2)) +
+                r.uniform_(*self.cfg.ranges.pitch)
+            )
+            euler_angles[:, 2] = (
+                torch.atan2(delta_y, delta_x) +
+                r.uniform_(*self.cfg.ranges.yaw)
+            )
+
+        # 通用模式（完全随机采样）
+        else:
+            self.pose_command_b[env_ids, 0] = r.uniform_(*self.cfg.ranges.pos_x)
+            self.pose_command_b[env_ids, 1] = r.uniform_(*self.cfg.ranges.pos_y)
+            self.pose_command_b[env_ids, 2] = r.uniform_(*self.cfg.ranges.pos_z)
+
+            euler_angles[:, 0] = r.uniform_(*self.cfg.ranges.roll)
+            euler_angles[:, 1] = r.uniform_(*self.cfg.ranges.pitch)
+            euler_angles[:, 2] = r.uniform_(*self.cfg.ranges.yaw)
+
+        # 将欧拉角转换为四元数
+        quat = quat_from_euler_xyz(euler_angles[:, 0], euler_angles[:, 1], euler_angles[:, 2])
+        
+        # 确保四元数唯一性（实部为正）
         if self.cfg.make_quat_unique:
-            quat = quat_unique(quat)
+            quat = quat_unique(quat)    
         self.pose_command_b[env_ids, 3:] = quat
+
+
 
     def _update_command(self) -> None:
         """No continuous update for pose commands."""
         pass
 
+    def __str__(self) -> str:
+        msg = "UniformPoseCommand:\n"
+        msg += f"\tCommand dimension: {tuple(self.command.shape[1:])}\n"
+        msg += f"\tResampling time range: {self.cfg.resampling_time_range}\n"
+        return msg
+    
+    
     # GUI 实时控制（与 velocity_command 一致）
     def create_gui(
         self,
@@ -249,6 +422,45 @@ class UniformPoseCommandCfg(CommandTermCfg):
 
     make_quat_unique: bool = True
     """Ensure quaternion has positive real part (unique representation)."""
+
+    # ===== 新增 B2Z1 相关参数 =====
+    
+    is_B2Z1: bool = False
+    """B2Z1 标志。
+    启用 B2Z1 特有的课程学习和智能姿态计算。
+    对应原代码的 is_Go2ARM。
+    """
+    
+    is_B2Z1_Play: bool = False
+    """B2Z1 测试模式标志。
+    启用固定范围采样，无课程学习。
+    对应原代码的 is_Go2ARM_Play。
+    """
+    
+    is_B2Z1_Flat: bool = True
+    """B2Z1 平坦地形标志。
+    用于区分平坦/粗糙地形的训练配置。
+    对应原代码的 is_Go2ARM_Flat。
+    """
+    
+    curriculum_coeff: int = None
+    """课程学习系数。
+    控制从初始范围到最终范围的过渡速度。
+    数值越大，过渡越慢。
+    对应原代码的 curriculum_coeff。
+    """
+    
+    ranges_init: Ranges = None
+    """初始训练范围。
+    训练初期使用的较小范围。
+    对应原代码的 ranges_init。
+    """
+    
+    ranges_final: Ranges = None
+    """最终训练范围。
+    训练后期使用的完整范围。
+    对应原代码的 ranges_final。
+    """
 
     def build(self, env: ManagerBasedRlEnv) -> UniformPoseCommand:
         return UniformPoseCommand(self, env)

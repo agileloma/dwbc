@@ -42,20 +42,7 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
     num_envs=1,
     extent=2.0,
     terrain=TerrainEntityCfg(terrain_type="plane"),
-    entities={"robot": get_b2z1_robot_cfg()},
-  #   sensors=(
-  #   ContactSensorCfg(
-  #     name="contact_forces",
-  #     primary=ContactMatch(
-  #       mode="body",
-  #       pattern=("FL_calf", "FR_calf", "RL_calf", "RR_calf"),
-  #       entity="robot",
-  #     ),
-  #     track_air_time=True,
-  #     fields=("found", "force"),
-  #   ),
-  # ),
-       
+    entities={"robot": get_b2z1_robot_cfg()},    
   )
 
     # 足端接触传感器（检测脚与地面的接触力，用于计算空中时间）
@@ -261,30 +248,67 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
     "twist": UniformVelocityCommandCfg(
       entity_name="robot",
       resampling_time_range=(3.0, 8.0),
+      is_B2Z1=True,  # 对应原代码的 is_Go2ARM=True
+      curriculum_coeff=1000,
       ranges=UniformVelocityCommandCfg.Ranges(
-        
-        # lin_vel_x=(-1.0, 1.0), 
-        # lin_vel_y=(-1.0, 1.0),
-        # ang_vel_z=(-1.0, 1.0),
-        
-        lin_vel_x=(-0.5, 0.5), 
-        lin_vel_y=(-0.5, 0.5),
+        lin_vel_x=(0.2, 1.0), 
+        lin_vel_y=(-0.5, 0.5), 
         ang_vel_z=(-0.5, 0.5),
+        heading=(-0.0, 0.0)
+        ),
+      
+      ranges_final=UniformVelocityCommandCfg.Ranges(
+          lin_vel_x=(0.1, 0.8), 
+          lin_vel_y=(-0.5, 0.5), 
+          ang_vel_z=(-0.5, 0.5),
+          heading=(-0.0, 0.0)
+        ),
+      
+      ranges_init=UniformVelocityCommandCfg.Ranges(
+          lin_vel_x=(0.1, 0.35), 
+          lin_vel_y=(-0.1, 0.1), 
+          ang_vel_z=(-0.1, 0.1),
+          heading=(-0.0, 0.0)
       )
     ),  
     # arm
     "arm_pose": UniformPoseCommandCfg(      
       entity_name="robot",
       body_name="link06",          
-      resampling_time_range=(3.0, 8.0),      
+      resampling_time_range=(3.0, 8.0), 
+      is_B2Z1=True,  # 对应原代码的 is_Go2ARM=True
+      curriculum_coeff=1000,   
+
+      # 初始训练范围（简单）
+      ranges_init=UniformPoseCommandCfg.Ranges(
+            pos_x=(0.45, 0.5),      # 小范围，靠近身体
+            pos_y=(-0.05, 0.05),    # 几乎在中心线
+            pos_z=(0.35, 0.4),       # 中等高度小范围
+            roll=(-0.0, 0.0),        # 无滚转
+            pitch=(-0.0, 0.0),       # 无俯仰  
+            yaw=(-0.0, 0.0),         # 无偏航
+        ),
+        
+      # 中期训练范围（中等难度）
       ranges=UniformPoseCommandCfg.Ranges(
-            pos_x=(0.2, 0.6),               
-            pos_y=(-0.3, 0.3),               
-            pos_z=(0.0, 0.4),                
-            roll=(-0.5, 0.5),              
-            pitch=(-0.5, 1.0),           
-            yaw=(-1.0, 1.0),                    
-      ),
+            pos_x=(0.4, 0.6),        # 前后范围
+            pos_y=(-0.35, 0.35),      # 左右范围
+            pos_z=(0.1, 0.55),        # 高度范围
+            roll=(-0.0, 0.0),         # 仍无滚转（与原始一致）
+            pitch=(-0.35, 0.35),      # ±20度俯仰
+            yaw=(-0.35, 0.35),        # ±20度偏航
+        ),
+        
+      # 最终训练范围（完整难度）
+      ranges_final=UniformPoseCommandCfg.Ranges(
+            pos_x=(0.4, 0.6),         # 保持相同位置范围
+            pos_y=(-0.35, 0.35),
+            pos_z=(0.1, 0.55),
+            roll=(-0.0, 0.0),          # 仍无滚转
+            pitch=(-0.35, 0.35),       # ±20度俯仰
+            yaw=(-0.35, 0.35),         # ±20度偏航
+        ),
+
       make_quat_unique=True,               
     ),
   }
@@ -421,7 +445,7 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
 
     # arm
-    "track_arm_position": RewardTermCfg(
+    "end_effector_position_tracking": RewardTermCfg(
         func=mdp.track_pose_position,        
         weight=1.0,
         params={
@@ -430,7 +454,7 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
             "std": 0.1,                    
         }
     ),
-    "track_arm_orientation": RewardTermCfg(
+    "end_effector_orientation_tracking": RewardTermCfg(
         func=mdp.track_pose_orientation,      
         weight=0.5,
         params={
@@ -446,7 +470,7 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
         # ===== 机械臂关节偏差惩罚 =====
         # 机械臂的关节偏差惩罚（负权重，但比腿部更严格）
-    "arm_joint_deviation": RewardTermCfg(
+    "end_effector_joint_deviation": RewardTermCfg(
         func=mdp.joint_deviation_l1,
         weight=-0.05,#-0.08,  # 机械臂需要更精确的位置控制，权重更高
         params={
@@ -467,7 +491,7 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
 
     # ===== 机械臂关节惩罚 =====
     # 机械臂关节力矩惩罚
-    "arm_joint_torques": RewardTermCfg(
+    "end_effector_joint_torques": RewardTermCfg(
         func=mdp.joint_torques_l2,
         weight=-5.0e-7,#-2.0e-6,#-5.0e-7,  # 机械臂需要更精确的力矩控制，权重提高2倍
         params={
@@ -482,7 +506,7 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     
     # 机械臂关节速度惩罚
-    "arm_joint_vel": RewardTermCfg(
+    "end_effector_joint_vel": RewardTermCfg(
         func=mdp.joint_vel_l2,
         weight=-2e-4,  # 机械臂速度控制更重要，权重提高2倍
         params={
@@ -497,7 +521,7 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
   
     # 机械臂关节加速度惩罚
-    "arm_joint_acc": RewardTermCfg(
+    "end_effector_acc": RewardTermCfg(
         func=mdp.joint_acc_l2,
         weight=-2.0e-6,#-2.0e-5,#-5.0e-7,  # 机械臂加速度控制更重要，权重提高2倍
         params={
