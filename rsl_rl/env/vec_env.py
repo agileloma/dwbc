@@ -18,6 +18,10 @@ class VecEnv(ABC):
     action is applied to all environments and the same type of observation is returned from all environments.
     """
 
+    num_prop: int
+    num_history: int
+    num_priv: int
+    
     num_envs: int
     """Number of environments."""
 
@@ -51,7 +55,7 @@ class VecEnv(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def step(self, actions: torch.Tensor) -> tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
+    def step(self, actions: torch.Tensor) -> tuple[TensorDict, torch.Tensor, torch.Tensor,torch.Tensor, dict]:
         """Apply input action to the environment.
 
         Args:

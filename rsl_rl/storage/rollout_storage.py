@@ -144,7 +144,7 @@ class RolloutStorage:
             batch_size=[num_transitions_per_env, num_envs],
             device=self.device,
         )
-        self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+        self.rewards = torch.zeros(num_transitions_per_env, num_envs, 2, device=self.device)
         self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
 
@@ -154,11 +154,11 @@ class RolloutStorage:
 
         # For reinforcement learning
         if training_type == "rl":
-            self.values = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-            self.actions_log_prob = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+            self.values = torch.zeros(num_transitions_per_env, num_envs, 2, device=self.device)
+            self.actions_log_prob = torch.zeros(num_transitions_per_env, num_envs, 2, device=self.device)
             self.distribution_params: tuple[torch.Tensor, ...] | None = None  # Lazily initialized on first transition
-            self.returns = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-            self.advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+            self.returns = torch.zeros(num_transitions_per_env, num_envs, 2, device=self.device)
+            self.advantages = torch.zeros(num_transitions_per_env, num_envs, 2, device=self.device)
 
         # For recurrent networks
         self.saved_hidden_state_a = None
@@ -176,7 +176,7 @@ class RolloutStorage:
         # Core
         self.observations[self.step].copy_(transition.observations)
         self.actions[self.step].copy_(transition.actions)  # type: ignore
-        self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
+        self.rewards[self.step].copy_(transition.rewards)
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
 
         # For distillation
@@ -186,7 +186,7 @@ class RolloutStorage:
         # For reinforcement learning
         if self.training_type == "rl":
             self.values[self.step].copy_(transition.values)  # type: ignore
-            self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
+            self.actions_log_prob[self.step].copy_(transition.actions_log_prob)
             if self.distribution_params is None:  # Initialize the distribution parameters
                 self.distribution_params = tuple(
                     torch.zeros(self.num_transitions_per_env, *p.shape, device=self.device)

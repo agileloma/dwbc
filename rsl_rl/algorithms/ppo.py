@@ -15,6 +15,7 @@ from tensordict import TensorDict
 from rsl_rl.env import VecEnv
 from rsl_rl.extensions import RandomNetworkDistillation, resolve_rnd_config, resolve_symmetry_config
 from rsl_rl.models import MLPModel
+# from rsl_rl.models import MLPModel, ActorWithEncoders, CriticWithEncoders
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import resolve_callable, resolve_obs_groups, resolve_optimizer
 
@@ -32,9 +33,10 @@ class PPO:
     critic: MLPModel
     """The critic model."""
 
+
     def __init__(
         self,
-        actor: MLPModel,
+        actor:  MLPModel,
         critic: MLPModel,
         storage: RolloutStorage,
         num_learning_epochs: int = 5,
@@ -48,7 +50,7 @@ class PPO:
         max_grad_norm: float = 1.0,
         optimizer: str = "adam",
         use_clipped_value_loss: bool = True,
-        schedule: str = "adaptive",
+        schedule: str = "adaptive", # fixed
         desired_kl: float = 0.01,
         normalize_advantage_per_mini_batch: bool = False,
         device: str = "cpu",
@@ -58,6 +60,13 @@ class PPO:
         symmetry_cfg: dict | None = None,
         # Distributed training parameters
         multi_gpu_cfg: dict | None = None,
+
+        # b2z1 带臂四足机器人腿和臂优势混合
+        mixing_schedule = [0.5, 2000, 4000], 
+        dagger_update_freq = 20,
+        # priv_reg_coef_schedual = [0, 0, 0],
+        priv_reg_coef_schedual = [0.0, 0.1, 1000, 5000],
+        eps = 1e-5,
     ) -> None:
         """Initialize the algorithm with models, storage, and optimization settings."""
         # Device-related parameters
@@ -113,13 +122,20 @@ class PPO:
         self.critic = critic.to(self.device)
 
         # Create the optimizer
-        self.optimizer = resolve_optimizer(optimizer)(
-            chain(self.actor.parameters(), self.critic.parameters()), lr=learning_rate
-        )  # type: ignore
-
+        self.optimizer = optim.Adam(
+            chain(self.actor.parameters(), self.critic.parameters()),
+            lr=learning_rate, eps=eps
+        )
         # Add storage
         self.storage = storage
+        # self.storage = None # TODO 后面初始化
         self.transition = RolloutStorage.Transition()
+
+        # b2z1历史编码器
+        if hasattr(self.actor, 'history_encoder'):
+            self.hist_encoder_optimizer = optim.Adam(self.actor.history_encoder.parameters(), lr=learning_rate)
+        else:
+            self.hist_encoder_optimizer = None
 
         # PPO parameters
         self.clip_param = clip_param
@@ -136,21 +152,38 @@ class PPO:
         self.learning_rate = learning_rate
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
 
-    def act(self, obs: TensorDict) -> torch.Tensor:
+        # b2z1 
+        self.priv_reg_coef_schedual = priv_reg_coef_schedual
+        self.mixing_schedule = mixing_schedule
+        self.counter = 0
+        self.num_leg_actions = getattr(actor, 'num_leg_actions', None)
+        self.num_arm_actions = getattr(actor, 'num_arm_actions', None)
+        if self.num_leg_actions is None or self.num_arm_actions is None:
+            raise ValueError("Actor must have num_leg_actions and num_arm_attributes")
+
+    def act(self, obs: TensorDict, hist_encoding=False ) -> torch.Tensor:
         """Sample actions and store transition data."""
+        # 设置 actor 的编码模式
+        if hasattr(self.actor, 'set_encoding_mode'):
+            self.actor.set_encoding_mode('hist' if hist_encoding else 'priv')
+        
         # Record the hidden states for recurrent policies
         self.transition.hidden_states = (self.actor.get_hidden_state(), self.critic.get_hidden_state())
         # Compute the actions and values
         self.transition.actions = self.actor(obs, stochastic_output=True).detach()
         self.transition.values = self.critic(obs).detach()
-        self.transition.actions_log_prob = self.actor.get_output_log_prob(self.transition.actions).detach()  # type: ignore
+
+        actions_log_prob_full = self.actor.get_output_log_prob(self.transition.actions).detach()  # [num_envs, num_actions]
+        leg_log_prob = actions_log_prob_full[:, :self.num_leg_actions].sum(dim=-1, keepdim=True)  # [num_envs, 1]
+        arm_log_prob = actions_log_prob_full[:, self.num_leg_actions:].sum(dim=-1, keepdim=True)  # [num_envs, 1]
+        self.transition.actions_log_prob = torch.cat([leg_log_prob, arm_log_prob], dim=-1)  # [num_envs, 2]      
         self.transition.distribution_params = tuple(p.detach() for p in self.actor.output_distribution_params)
         # Record observations before env.step()
         self.transition.observations = obs
         return self.transition.actions  # type: ignore
 
     def process_env_step(
-        self, obs: TensorDict, rewards: torch.Tensor, dones: torch.Tensor, extras: dict[str, torch.Tensor]
+        self, obs: TensorDict, rewards: torch.Tensor, arm_rewards: torch.Tensor, dones: torch.Tensor, extras: dict[str, torch.Tensor]
     ) -> None:
         """Record one environment step and update the normalizers."""
         # Update the normalizers
@@ -161,7 +194,8 @@ class PPO:
 
         # Record the rewards and dones
         # Note: We clone here because later on we bootstrap the rewards based on timeouts
-        self.transition.rewards = rewards.clone()
+        # self.transition.rewards = rewards.clone()
+        self.transition.rewards = torch.stack([rewards.clone(), arm_rewards.clone()], dim=-1)
         self.transition.dones = dones
 
         # Compute the intrinsic rewards and add to extrinsic rewards
@@ -213,6 +247,9 @@ class PPO:
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_entropy = 0
+        # b2z1
+        mean_priv_reg_loss = 0
+        value_mixing_ratio = self.get_value_mixing_ratio()
         # RND loss
         mean_rnd_loss = 0 if self.rnd else None
         # Symmetry loss
@@ -265,6 +302,17 @@ class PPO:
             distribution_params = tuple(p[:original_batch_size] for p in self.actor.output_distribution_params)
             entropy = self.actor.output_entropy[:original_batch_size]
 
+            # 历史编码器/特权编码器更新 
+            priv_latent_batch = self.actor.infer_priv_latent(batch.observations)
+            with torch.inference_mode():
+                hist_latent_batch = self.actor.infer_hist_latent(batch.observations)
+            priv_reg_loss = (priv_latent_batch - hist_latent_batch.detach()).norm(p=2, dim=1).mean()
+            priv_reg_stage = min(max((self.counter - self.priv_reg_coef_schedual[2]), 0) / self.priv_reg_coef_schedual[3], 1)
+            priv_reg_coef = priv_reg_stage * (self.priv_reg_coef_schedual[1] - self.priv_reg_coef_schedual[0]) + self.priv_reg_coef_schedual[0]
+            self.priv_reg_coef = priv_reg_coef  # 存储为属性
+            # priv_reg_stage = min(max((self.counter - priv_reg_coef_schedual[2]) / priv_reg_coef_schedual[3], 0), 1)
+            # priv_reg_coef = priv_reg_stage * (priv_reg_coef_schedual[1] - priv_reg_coef_schedual[0]) + priv_reg_coef_schedual[0]
+
             # Compute KL divergence and adapt the learning rate
             if self.desired_kl is not None and self.schedule == "adaptive":
                 with torch.inference_mode():
@@ -294,12 +342,42 @@ class PPO:
                         param_group["lr"] = self.learning_rate
 
             # Surrogate loss
-            ratio = torch.exp(actions_log_prob - torch.squeeze(batch.old_actions_log_prob))  # type: ignore
-            surrogate = -torch.squeeze(batch.advantages) * ratio  # type: ignore
-            surrogate_clipped = -torch.squeeze(batch.advantages) * torch.clamp(  # type: ignore
-                ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
-            )
-            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+            # 优势混合
+            mixing_advantages = torch.zeros_like(batch.advantages)   # [batch, 2]
+            mixing_advantages[:, 0] += value_mixing_ratio * batch.advantages[:, 1]  # type: ignore
+            mixing_advantages[:, 1] += value_mixing_ratio * batch.advantages[:, 0]      # type: ignore
+
+            # actions_log_prob的形状是[batch, 2]（腿和臂分开）
+
+            # 分离腿和臂的对数概率（假设 actions_log_prob 形状为 [batch, num_actions]）
+            leg_log_prob = actions_log_prob[:, :self.num_leg_actions].sum(dim=-1)   # [batch]
+            arm_log_prob = actions_log_prob[:, self.num_leg_actions:].sum(dim=-1)   # [batch]
+            old_leg_log_prob = batch.old_actions_log_prob[:, 0]  # type: ignore # [batch]
+            old_arm_log_prob = batch.old_actions_log_prob[:, 1]  # type: ignore # [batch]
+
+
+            # 计算比率
+            leg_ratio = torch.exp(leg_log_prob - old_leg_log_prob)   # [batch]
+            arm_ratio = torch.exp(arm_log_prob - old_arm_log_prob)   # [batch]
+
+            # 混合优势（与原来相同）
+            mixing_advantages = batch.advantages.clone()   # [batch, 2]
+            mixing_advantages[:, 0] += value_mixing_ratio * batch.advantages[:, 1] # type: ignore
+            mixing_advantages[:, 1] += value_mixing_ratio * batch.advantages[:, 0] # type: ignore
+
+            # 腿的 surrogate loss
+            leg_surr = - mixing_advantages[:, 0] * leg_ratio
+            leg_surr_clipped = - mixing_advantages[:, 0] * torch.clamp(leg_ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
+            leg_loss = torch.max(leg_surr, leg_surr_clipped)
+
+            # 臂的 surrogate loss
+            arm_surr = - mixing_advantages[:, 1] * arm_ratio
+            arm_surr_clipped = - mixing_advantages[:, 1] * torch.clamp(arm_ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
+            arm_loss = torch.max(arm_surr, arm_surr_clipped)
+
+            # 总 surrogate loss（平均）
+            surrogate_loss = (leg_loss + arm_loss).mean()
+
 
             # Value function loss
             if self.use_clipped_value_loss:
@@ -310,7 +388,7 @@ class PPO:
             else:
                 value_loss = (batch.returns - values).pow(2).mean()
 
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy.mean()
+            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy.mean() + priv_reg_coef * priv_reg_loss
 
             # Symmetry loss
             if self.symmetry:
@@ -382,6 +460,7 @@ class PPO:
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy += entropy.mean().item()
+            mean_priv_reg_loss += priv_reg_loss.item()
             # RND loss
             if mean_rnd_loss is not None:
                 mean_rnd_loss += rnd_loss.item()
@@ -394,6 +473,7 @@ class PPO:
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
         mean_entropy /= num_updates
+        mean_priv_reg_loss /= num_updates
         if mean_rnd_loss is not None:
             mean_rnd_loss /= num_updates
         if mean_symmetry_loss is not None:
@@ -401,12 +481,16 @@ class PPO:
 
         # Clear the storage
         self.storage.clear()
+        self.update_counter()
 
         # Construct the loss dictionary
         loss_dict = {
             "value": mean_value_loss,
             "surrogate": mean_surrogate_loss,
             "entropy": mean_entropy,
+            "mixing_ratio":value_mixing_ratio,
+            "priv_reg_loss":mean_priv_reg_loss,
+            "priv_reg_coef":priv_reg_coef,
         }
         if self.rnd:
             loss_dict["rnd"] = mean_rnd_loss
@@ -492,9 +576,7 @@ class PPO:
         # Initialize the policy
         actor: MLPModel = actor_class(obs, cfg["obs_groups"], "actor", env.num_actions, **cfg["actor"]).to(device)
         print(f"Actor Model: {actor}")
-        if cfg["algorithm"].pop("share_cnn_encoders", None):  # Share CNN encoders between actor and critic
-            cfg["critic"]["cnns"] = actor.cnns  # type: ignore
-        critic: MLPModel = critic_class(obs, cfg["obs_groups"], "critic", 1, **cfg["critic"]).to(device)
+        critic: MLPModel = critic_class(obs, cfg["obs_groups"], "critic", 2, **cfg["critic"]).to(device)  # output_dim = 2
         print(f"Critic Model: {critic}")
 
         # Initialize the storage
@@ -543,3 +625,38 @@ class PPO:
                 param.grad.data.copy_(all_grads[offset : offset + numel].view_as(param.grad.data))
                 # Update the offset for the next parameter
                 offset += numel
+
+    def get_value_mixing_ratio(self):
+            return min(max((self.counter - self.mixing_schedule[1]) / self.mixing_schedule[2], 0), 1) * self.mixing_schedule[0]
+    
+    def update_counter(self):
+        self.counter += 1
+
+    def update_dagger(self):
+        mean_hist_latent_loss = 0
+        # if self.actor.is_recurrent:
+        #     generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+        # else:
+        #     generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+        generator = self.storage.mini_batch_generator(self.num_mini_batches, 1) 
+        for batch in generator: #TODO
+                # print('obs_batch_updatedagger', obs_batch.shape)
+                # with torch.inference_mode():
+                #     self.actor.act(batch.observations, hist_encoding=True, masks=batch.masks, hidden_state=batch.hidden_states[0])
+
+                # Adaptation module update
+                with torch.inference_mode():
+                    priv_latent_batch = self.actor.infer_priv_latent(batch.observations)
+                hist_latent_batch = self.actor.infer_hist_latent(batch.observations)
+                hist_latent_loss = (priv_latent_batch.detach() - hist_latent_batch).norm(p=2, dim=1).mean()
+                self.hist_encoder_optimizer.zero_grad()
+                hist_latent_loss.backward()
+                nn.utils.clip_grad_norm_(self.actor.history_encoder.parameters(), self.max_grad_norm)
+                self.hist_encoder_optimizer.step()
+                
+                mean_hist_latent_loss += hist_latent_loss.item()
+        num_updates = self.num_learning_epochs * self.num_mini_batches
+        mean_hist_latent_loss /= num_updates
+        self.storage.clear()
+        self.update_counter()
+        return mean_hist_latent_loss

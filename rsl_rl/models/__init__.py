@@ -8,9 +8,12 @@
 from .cnn_model import CNNModel
 from .mlp_model import MLPModel
 from .rnn_model import RNNModel
+from .A2C import ActorWithEncoders, CriticWithEncoders
 
 __all__ = [
     "CNNModel",
     "MLPModel",
     "RNNModel",
+    "ActorWithEncoders",
+    "CriticWithEncoders",
 ]

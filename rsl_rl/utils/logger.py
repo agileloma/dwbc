@@ -49,6 +49,10 @@ class Logger:
         self.cur_reward_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.cur_episode_length = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
+        # b2z1 modification: add arm reward buffers
+        self.arm_rewbuffer = deque(maxlen=100)
+        self.cur_arm_reward_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+      
         # Create RND buffers
         if self.cfg["algorithm"]["rnd_cfg"]:
             self.erewbuffer = deque(maxlen=100)
@@ -100,8 +104,18 @@ class Logger:
         dones: torch.Tensor,
         extras: dict,
         intrinsic_rewards: torch.Tensor | None = None,
+        arm_rewards: torch.Tensor | None = None,
     ) -> None:
-        """Add metrics from the environment step to the buffers."""
+        """Add metrics from the environment step to the buffers.
+
+        Args:
+            rewards: total rewards (may include intrinsic rewards if RND is used).
+            dones: done flags.
+            extras: extra info dictionary.
+            intrinsic_rewards: intrinsic rewards from RND (optional).
+            arm_rewards: arm-specific rewards (optional). If provided, they are logged separately.
+        
+        """
         if self.writer is not None:
             if "episode" in extras:
                 self.ep_extras.append(extras["episode"])
@@ -115,6 +129,11 @@ class Logger:
                 self.cur_reward_sum += rewards + intrinsic_rewards
             else:
                 self.cur_reward_sum += rewards
+            
+            # b2z1 modification: update arm reward sum if provided
+            if arm_rewards is not None:
+                self.cur_arm_reward_sum += arm_rewards
+          
             self.cur_episode_length += 1
 
             # Clear data for completed episodes
@@ -123,6 +142,12 @@ class Logger:
             self.lenbuffer.extend(self.cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
             self.cur_reward_sum[new_ids] = 0
             self.cur_episode_length[new_ids] = 0
+            
+            # b2z1 modification: handle arm rewards
+            if arm_rewards is not None:
+                self.arm_rewbuffer.extend(self.cur_arm_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
+                self.cur_arm_reward_sum[new_ids] = 0
+            
             if intrinsic_rewards is not None:
                 self.erewbuffer.extend(self.cur_ereward_sum[new_ids][:, 0].cpu().numpy().tolist())
                 self.irewbuffer.extend(self.cur_ireward_sum[new_ids][:, 0].cpu().numpy().tolist())
@@ -208,6 +233,10 @@ class Logger:
                         "Train/mean_episode_length/time", statistics.mean(self.lenbuffer), int(self.tot_time)
                     )
 
+            # b2z1 modification: log arm rewards if available
+            if len(self.arm_rewbuffer) > 0:
+                self.writer.add_scalar("Train/mean_arm_reward", statistics.mean(self.arm_rewbuffer), it)
+
             # Print to console
             log_string = f"""{"#" * width}\n"""
             log_string += f"""\033[1m{f" Learning iteration {it}/{total_it} ".center(width)}\033[0m \n\n"""
@@ -236,6 +265,10 @@ class Logger:
                 log_string += f"""{"Mean reward:":>{pad}} {statistics.mean(self.rewbuffer):.2f}\n"""
                 log_string += f"""{"Mean episode length:":>{pad}} {statistics.mean(self.lenbuffer):.2f}\n"""
 
+            # b2z1 modification: print arm reward if available
+            if len(self.arm_rewbuffer) > 0:
+                log_string += f"""{"Mean arm reward:":>{pad}} {statistics.mean(self.arm_rewbuffer):.2f}\n"""
+            
             # Print std
             log_string += f"""{"Mean action std:":>{pad}} {action_std.mean().item():.2f}\n"""
 

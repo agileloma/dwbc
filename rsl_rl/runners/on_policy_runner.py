@@ -9,6 +9,10 @@ from __future__ import annotations
 import os
 import time
 import torch
+import statistics
+from collections import deque
+import numpy as np
+from tensordict import TensorDict
 
 from rsl_rl.algorithms import PPO
 from rsl_rl.env import VecEnv
@@ -51,6 +55,15 @@ class OnPolicyRunner:
             device=self.device,
         )
 
+        # b2z1 
+        self.num_prop = env.num_prop
+        self.num_priv = env.num_priv
+        self.num_history = env.num_history
+        self.dagger_update_freq = self.cfg["algorithm"].get("dagger_update_freq", 20)
+
+        # b2z1 
+        self._prepare_obs_reorder()
+
         self.current_learning_iteration = 0
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
@@ -73,29 +86,39 @@ class OnPolicyRunner:
         # Initialize the logging writer
         self.logger.init_logging_writer()
 
+        # 读取 dagger 更新频率（从算法配置中获取）
+        dagger_update_freq = self.dagger_update_freq
+
         # Start training
         start_it = self.current_learning_iteration
         total_it = start_it + num_learning_iterations
         for it in range(start_it, total_it):
             start = time.time()
+            # 判断当前迭代是否使用历史编码器（dagger 模式）
+            hist_encoding = (it % dagger_update_freq == 0)
             # Rollout
             with torch.inference_mode():
                 for _ in range(self.cfg["num_steps_per_env"]):
                     # Sample actions
-                    actions = self.alg.act(obs)
+                    actions = self.alg.act(obs, hist_encoding=hist_encoding)
                     # Step the environment
-                    obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
+                    obs, rewards, arm_rewards, dones, extras = self.env.step(actions.to(self.env.device))                    
+                    # b2z1 modification: reorder observations if needed
+                    obs = self._reorder_obs(obs)                    
                     # Check for NaN values from the environment
                     if self.cfg.get("check_for_nan", True):
                         check_nan(obs, rewards, dones)
                     # Move to device
-                    obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
+                    obs, rewards, arm_rewards, dones = (obs.to(self.device), rewards.to(self.device), arm_rewards.to(self.device),dones.to(self.device))
                     # Process the step
-                    self.alg.process_env_step(obs, rewards, dones, extras)
+                    self.alg.process_env_step(obs, rewards, arm_rewards, dones, extras)
                     # Extract intrinsic rewards if RND is used (only for logging)
-                    intrinsic_rewards = self.alg.intrinsic_rewards if self.cfg["algorithm"]["rnd_cfg"] else None
-                    # Book keeping
-                    self.logger.process_env_step(rewards, dones, extras, intrinsic_rewards)
+                    intrinsic_rewards = self.alg.intrinsic_rewards if self.cfg["algorithm"]["rnd_cfg"] else None                    
+
+                    # Update rewards
+                    extrinsic_total = rewards + arm_rewards
+
+                    self.logger.process_env_step(extrinsic_total, dones, extras, intrinsic_rewards, arm_rewards)
 
                 stop = time.time()
                 collect_time = stop - start
@@ -105,7 +128,15 @@ class OnPolicyRunner:
                 self.alg.compute_returns(obs)
 
             # Update policy
-            loss_dict = self.alg.update()
+            # loss_dict = self.alg.update()
+            # b2z1 modification: dagger update or normal policy update
+            if hist_encoding:
+                mean_hist_latent_loss = self.alg.update_dagger()
+                loss_dict = {"hist_latent_loss": mean_hist_latent_loss}
+                loss_dict["mixing_ratio"] = self.alg.get_value_mixing_ratio()
+                loss_dict["priv_reg_coef"] = self.alg.priv_reg_coef if hasattr(self.alg, 'priv_reg_coef') else 0.0
+            else:
+                loss_dict = self.alg.update()
 
             stop = time.time()
             learn_time = stop - start
@@ -247,3 +278,38 @@ class OnPolicyRunner:
         torch.distributed.init_process_group(backend="nccl", rank=self.gpu_global_rank, world_size=self.gpu_world_size)
         # Set device to the local rank
         torch.cuda.set_device(self.gpu_local_rank)
+
+    # b2z1 modification: helper functions for observation reordering
+    def _prepare_obs_reorder(self):
+        """
+        Precompute indices for reordering historical observations.
+        Assumes the environment returns a TensorDict with a key "policy" containing the flattened vector.
+        The flattened vector is expected to have shape [num_envs, num_prop * num_history + ...].
+        This method computes self.reorder_indices to transform the order from
+        [feature_timestep10 ... feature_timestep1] to [feature_timestep1 ... feature_timestep10].
+        """
+        # This is a placeholder; you need to implement based on your specific observation layout.
+        # If your environment already provides observations in the correct order, you can skip this.
+        # Example for a simple case where the first num_prop * num_history elements are the history:
+        # self.reorder_indices = torch.arange(self.num_prop * self.num_history).reshape(self.num_history, self.num_prop).T.flatten()
+        # But the actual order depends on how the environment stacks history.
+
+        # For now, we assume no reordering needed.
+        self.reorder_indices = None
+
+    def _reorder_obs(self, obs: TensorDict) -> TensorDict:
+        """
+        Apply observation reordering to the "policy" key of the TensorDict.
+        If reorder_indices is None, return obs unchanged.
+        """
+        if self.reorder_indices is None:
+            return obs
+        # Assume obs has a key "policy" with the flattened vector
+        policy_obs = obs["policy"]  # shape [num_envs, dim]
+        # Reorder the relevant slice (first num_prop * num_history dimensions)
+        hist_part = policy_obs[:, :self.num_prop * self.num_history]
+        reordered_hist = hist_part[:, self.reorder_indices]
+        # Replace in the tensor
+        policy_obs = torch.cat([reordered_hist, policy_obs[:, self.num_prop * self.num_history:]], dim=-1)
+        obs["policy"] = policy_obs
+        return obs
