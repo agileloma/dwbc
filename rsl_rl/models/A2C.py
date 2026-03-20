@@ -5,6 +5,7 @@ from rsl_rl.modules import MLP, EmpiricalNormalization, HiddenState
 from rsl_rl.modules.distribution import Distribution
 from rsl_rl.utils import resolve_nn_activation
 from rsl_rl.models import MLPModel
+import numpy as np
 
 # 保持原来的 StateHistoryEncoder 不变
 class StateHistoryEncoder(nn.Module):
@@ -110,7 +111,11 @@ class ActorWithEncoders(MLPModel):
         self.num_history = num_history
         self.activation_out_fn = resolve_nn_activation(activation_out)
         self._encoding_mode = 'priv'
-
+        self.term_dims = [3, 3, 18, 18, 18, 3, 7]  # 根据实际打印的顺序和维度填写
+        self.num_terms = len(self.term_dims)
+        # 计算每个 term 在堆叠向量中的起始索引（按 term-major 顺序，但还未乘 history）
+        term_cumsum = np.cumsum([0] + self.term_dims)
+        self.term_offsets = term_cumsum.tolist()  # [0,3,6,24,42,60,63,70]
 
         # 从 obs_groups 中获取需要编码的组
         # 假设配置中已经将 prop 观测组命名为 "proprioceptive"，特权组为 "privileged"
@@ -145,11 +150,9 @@ class ActorWithEncoders(MLPModel):
         # 当前 prop 维度 = num_prop（因为历史部分已经单独处理）
         mlp_input_dim = num_prop + priv_encoded_dim
 
-        # 如果 distribution_cfg 存在，需要确定 mlp_output_dim
-        if self.distribution is not None:
-            mlp_output_dim = self.distribution.input_dim
-        else:
-            mlp_output_dim = output_dim
+        # 设置 MLP 输出为 backbone 特征维度（actor_hidden_dims 的最后一个维度）
+        backbone_dim = actor_hidden_dims[-1] if actor_hidden_dims else mlp_input_dim
+        mlp_output_dim = backbone_dim  # 256
 
         # 重新构建 MLP（替换父类自动创建的 self.mlp）
         self.mlp = MLP(mlp_input_dim, mlp_output_dim, actor_hidden_dims, activation)
@@ -194,18 +197,30 @@ class ActorWithEncoders(MLPModel):
         prop_obs = torch.cat([obs[group] for group in self.obs_groups if group != "privileged"], dim=-1)
         priv_obs = obs.get("privileged", None)
 
+        # 重塑 prop_obs 为 (num_envs, num_terms, num_history, term_dim)
+        # 首先需要知道每个 term 的维度，以及 history_length
+        B = prop_obs.shape[0]
+        # --- 正确提取当前 proprio（每个 term 的最后一个时间步）---
+        current_prop_parts = []
+        for i, dim in enumerate(self.term_dims):
+            # 每个 term 在堆叠向量中的起始和结束索引（考虑 history 展开）
+            start = self.term_offsets[i] * self.num_history
+            end = self.term_offsets[i+1] * self.num_history
+            term_data = prop_obs[:, start:end]  # (B, num_history * dim)
+            term_data = term_data.view(B, self.num_history, dim)  # (B, num_history, dim)
+            current_prop_parts.append(term_data[:, -1, :])         # (B, dim)
+        current_prop = torch.cat(current_prop_parts, dim=-1)       # (B, 70)
+
+
         # 历史编码
-        hist_part = prop_obs[:, :self.num_prop * self.num_history]
-        hist_part = hist_part.view(-1, self.num_history, self.num_prop)
-        hist_feat = self.history_encoder(hist_part)
+        hist_input = prop_obs.view(B, self.num_history, self.num_prop)  # (B, 10, 70)
+        hist_feat = self.history_encoder(hist_input)                     # (B, 18)
 
         # 特权编码（如果存在）
         if priv_obs is not None:
             priv_feat = self.priv_encoder(priv_obs)
         else:
-            priv_feat = torch.zeros(prop_obs.shape[0], self.priv_encoded_dim, device=prop_obs.device)
-
-        current_prop = prop_obs[:, -self.num_prop:]
+            priv_feat = torch.zeros(B, self.priv_encoded_dim, device=prop_obs.device)
 
 
         if self._encoding_mode == 'hist':
@@ -222,12 +237,11 @@ class ActorWithEncoders(MLPModel):
     def forward(self, obs, masks=None, hidden_state=None, stochastic_output=False):
         # 调用 get_latent 获取输入特征
         latent = self.get_latent(obs, masks, hidden_state)
-        # MLP 前向
-        mlp_out = self.mlp(latent)
-        # 分离头
-        leg_out = self.actor_leg_head(mlp_out)
-        arm_out = self.actor_arm_head(mlp_out)
-        actions = torch.cat([leg_out, arm_out], dim=-1)
+        
+        backbone = self.mlp(latent)                     # (B, 256)
+        leg_out = self.actor_leg_head(backbone)         # (B, 12)
+        arm_out = self.actor_arm_head(backbone)         # (B, 6)
+        actions = torch.cat([leg_out, arm_out], dim=-1) # (B, 18)
 
         # 如果使用分布，则处理随机输出
         if self.distribution is not None:
@@ -246,9 +260,9 @@ class ActorWithEncoders(MLPModel):
 
     def infer_hist_latent(self, obs: TensorDict):
         prop_obs = torch.cat([obs[group] for group in self.obs_groups if group != "privileged"], dim=-1)
-        hist_part = prop_obs[:, :self.num_prop * self.num_history]
-        hist_part = hist_part.view(-1, self.num_history, self.num_prop)
-        return self.history_encoder(hist_part)
+        B = prop_obs.shape[0]
+        hist_input = prop_obs.view(B, self.num_history, self.num_prop)
+        return self.history_encoder(hist_input)
 
     def reset(self, dones=None, hidden_state=None):
         # """重置历史编码器的隐藏状态（当环境 done 时）"""
@@ -278,18 +292,23 @@ class ActorWithEncoders(MLPModel):
 
     @property
     def output_std(self):
-        return self.distribution.stddev
+        return self.distribution.std
 
     @property
     def output_entropy(self):
-        return self.distribution.entropy()  # [batch, num_actions]
+        return self.distribution.entropy  # [batch, num_actions]
 
     @property
     def output_distribution_params(self):
         return self.distribution.params
 
     def get_output_log_prob(self, outputs):
-        return self.distribution.log_prob(outputs)  # [batch, num_actions]
+        # 获取分布当前的均值和标准差（已在 forward 中更新）
+        mean = self.distribution.mean          # shape: (batch, num_actions)
+        std = self.distribution.std      # shape: (batch, num_actions)
+        # 手动计算每个动作维度的对数概率
+        log_prob = -0.5 * ( ((outputs - mean) / std)**2 + 2*torch.log(std) + torch.log(torch.tensor(2*np.pi, device=outputs.device)) )
+        return log_prob  # shape: (batch, num_actions)
 
     def get_kl_divergence(self, old_params, new_params):
         return self.distribution.kl_divergence(old_params, new_params)

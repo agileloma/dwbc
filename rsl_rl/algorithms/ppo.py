@@ -174,6 +174,7 @@ class PPO:
         self.transition.values = self.critic(obs).detach()
 
         actions_log_prob_full = self.actor.get_output_log_prob(self.transition.actions).detach()  # [num_envs, num_actions]
+        # print(f"[DEBUG] actions_log_prob_full shape: {actions_log_prob_full.shape}")
         leg_log_prob = actions_log_prob_full[:, :self.num_leg_actions].sum(dim=-1, keepdim=True)  # [num_envs, 1]
         arm_log_prob = actions_log_prob_full[:, self.num_leg_actions:].sum(dim=-1, keepdim=True)  # [num_envs, 1]
         self.transition.actions_log_prob = torch.cat([leg_log_prob, arm_log_prob], dim=-1)  # [num_envs, 2]      
@@ -572,6 +573,11 @@ class PPO:
 
         # Resolve symmetry config if used
         cfg["algorithm"] = resolve_symmetry_config(cfg["algorithm"], env)
+
+        # 移除 PPO 类不支持的参数
+        unsupported_keys = ["share_cnn_encoders"]  # 如果有其他不需要的参数，也可添加
+        for key in unsupported_keys:
+            cfg["algorithm"].pop(key, None)  # 安全删除，不存在则忽略
 
         # Initialize the policy
         actor: MLPModel = actor_class(obs, cfg["obs_groups"], "actor", env.num_actions, **cfg["actor"]).to(device)
