@@ -10,8 +10,13 @@ from typing import Literal, cast
 
 import tyro
 
-from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
-from mjlab.rl import MjlabOnPolicyRunner, RslRlBaseRunnerCfg, RslRlVecEnvWrapper
+# from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg # TODO
+# from mjlab.rl import MjlabOnPolicyRunner, RslRlBaseRunnerCfg, RslRlVecEnvWrapper # TODO
+from dwbc.env import B2Z1ManagerRLEnv
+from dwbc.env_cfgs import B2Z1RlEnvCfg
+from mjlab.rl import B2Z1OnPolicyRunner, B2Z1RslRlBaseRunnerCfg, B2Z1RslRlVecEnvWrapper
+
+
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.utils.gpu import select_gpus
@@ -23,8 +28,8 @@ from mjlab.utils.wrappers import VideoRecorder
 
 @dataclass(frozen=True)
 class TrainConfig:
-  env: ManagerBasedRlEnvCfg
-  agent: RslRlBaseRunnerCfg
+  env: B2Z1RlEnvCfg
+  agent: B2Z1RslRlBaseRunnerCfg
   registry_name: str | None = None
   video: bool = False
   video_length: int = 200
@@ -104,7 +109,7 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   if rank == 0:
     print(f"[INFO] Logging experiment in directory: {log_dir}")
 
-  env = ManagerBasedRlEnv(
+  env = B2Z1ManagerRLEnv(
     cfg=cfg.env, device=device, render_mode="rgb_array" if cfg.video else None
   )
 
@@ -142,14 +147,29 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     )
     print("[INFO] Recording videos during training.")
 
-  env = RslRlVecEnvWrapper(env, clip_actions=cfg.agent.clip_actions)
+  env = B2Z1RslRlVecEnvWrapper(env, clip_actions=cfg.agent.clip_actions)
 
+  # 从环境获取维度信息
+  num_prop = env.num_prop
+  num_priv = env.num_priv
+  num_history = env.num_history
+  print(f"[DEBUG] env.num_prop = {env.num_prop}")
+  print(f"[DEBUG] env.num_priv = {env.num_priv}")
+  print(f"[DEBUG] env.num_history = {env.num_history}")
   agent_cfg = asdict(cfg.agent)
+  agent_cfg["actor"]["num_prop"] = num_prop
+  agent_cfg["actor"]["num_priv"] = num_priv
+  agent_cfg["actor"]["num_history"] = num_history
+  agent_cfg["critic"]["num_prop"] = num_prop
+  agent_cfg["critic"]["num_priv"] = num_priv
+  print(f"[DEBUG] agent_cfg['actor'] after: {agent_cfg['actor']}")
+  
+  
   env_cfg = asdict(cfg.env)
 
   runner_cls = load_runner_cls(task_id)
   if runner_cls is None:
-    runner_cls = MjlabOnPolicyRunner
+    runner_cls = B2Z1OnPolicyRunner
 
   runner_kwargs = {}
   if is_tracking_task:

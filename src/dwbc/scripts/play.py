@@ -9,8 +9,10 @@ from typing import Literal
 import torch
 import tyro
 
-from mjlab.envs import ManagerBasedRlEnv
-from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
+# from mjlab.envs import ManagerBasedRlEnv # TODO
+# from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper # TODO
+from dwbc.env import B2Z1ManagerRLEnv
+from mjlab.rl import B2Z1OnPolicyRunner, B2Z1RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.utils.os import get_wandb_checkpoint_path
@@ -154,7 +156,7 @@ def run_play(task_id: str, cfg: PlayConfig):
     print(
       "[WARN] Video recording with dummy agents is disabled (no checkpoint/log_dir)."
     )
-  env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
+  env = B2Z1ManagerRLEnv(cfg=env_cfg, device=device, render_mode=render_mode)
 
   if TRAINED_MODE and cfg.video:
     print("[INFO] Recording videos during play")
@@ -167,7 +169,12 @@ def run_play(task_id: str, cfg: PlayConfig):
       disable_logger=True,
     )
 
-  env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+  env = B2Z1RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+  
+  num_prop = env.num_prop
+  num_priv = env.num_priv
+  num_history = env.num_history
+  
   if DUMMY_MODE:
     action_shape: tuple[int, ...] = env.unwrapped.action_space.shape
     if cfg.agent == "zero":
@@ -187,8 +194,22 @@ def run_play(task_id: str, cfg: PlayConfig):
 
       policy = PolicyRandom()
   else:
-    runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
-    runner = runner_cls(env, asdict(agent_cfg), device=device)
+    # 从环境获取维度
+    num_prop = env.num_prop
+    num_priv = env.num_priv
+    num_history = env.num_history
+    
+    # 将 agent_cfg 转为字典并注入维度
+    agent_cfg_dict = asdict(agent_cfg)
+    agent_cfg_dict["actor"]["num_prop"] = num_prop
+    agent_cfg_dict["actor"]["num_priv"] = num_priv
+    agent_cfg_dict["actor"]["num_history"] = num_history
+    agent_cfg_dict["critic"]["num_prop"] = num_prop
+    agent_cfg_dict["critic"]["num_priv"] = num_priv
+
+    runner_cls = load_runner_cls(task_id) or B2Z1OnPolicyRunner
+    # runner = runner_cls(env, asdict(agent_cfg), device=device)
+    runner = runner_cls(env, agent_cfg_dict, device=device)
     runner.load(
       str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
     )
