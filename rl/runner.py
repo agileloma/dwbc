@@ -4,13 +4,13 @@ import torch
 from rsl_rl.env import VecEnv
 from rsl_rl.runners import OnPolicyRunner
 
-from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
+from mjlab.rl.vecenv_wrapper import B2Z1RslRlVecEnvWrapper
 
 
-class MjlabOnPolicyRunner(OnPolicyRunner):
+class B2Z1OnPolicyRunner(OnPolicyRunner):
   """Base runner that persists environment state across checkpoints."""
 
-  env: RslRlVecEnvWrapper
+  env: B2Z1RslRlVecEnvWrapper
 
   def __init__(
     self,

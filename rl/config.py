@@ -5,8 +5,19 @@ from typing import Any, Literal, Tuple
 
 
 @dataclass
-class RslRlModelCfg:
+class B2Z1RslRlModelCfg:
   """Config for a single neural network model (Actor or Critic)."""
+
+  num_prop: int = 0          
+  
+  num_priv: int = 27
+  
+  num_history: int = 10
+
+  num_leg_actions : int = 12
+
+  num_arm_actions : int = 6
+
 
   hidden_dims: Tuple[int, ...] = (128, 128, 128)
   """The hidden dimensions of the network."""
@@ -28,12 +39,28 @@ class RslRlModelCfg:
 
   ``None`` means deterministic output (use for critic).
   """
-  class_name: str = "MLPModel"
-  """Model class name resolved by RSL-RL (MLPModel or CNNModel)."""
+  # class_name: str = "MLPModel"
+  # """Model class name resolved by RSL-RL (MLPModel or CNNModel)."""
+  
+  class_name: str = "ActorWithEncoders"  # 或 "CriticWithEncoders"
+ 
+  leg_control_head_hidden_dims: Tuple[int, ...] = (128, 64)
+  
+  arm_control_head_hidden_dims: Tuple[int, ...] = (128, 64)
+
+  priv_encoder_dims: Tuple[int, ...] = (32, 18)
+
+  activation_out: str = "elu"
+
+  critic_leg_control_head_hidden_dims: Tuple[int, ...] = (128, 64)
+  
+  critic_arm_control_head_hidden_dims: Tuple[int, ...] = (128, 64)
+
+
 
 
 @dataclass
-class RslRlPpoAlgorithmCfg:
+class B2Z1RslRlPpoAlgorithmCfg:
   """Config for the PPO algorithm."""
 
   num_learning_epochs: int = 5
@@ -74,9 +101,16 @@ class RslRlPpoAlgorithmCfg:
   class_name: str = "PPO"
   """Algorithm class name resolved by RSL-RL."""
 
+  mixing_schedule: Tuple[float, int, int] = (1.0, 0, 4000) 
+
+  dagger_update_freq: int = 20
+  
+  priv_reg_coef_schedual: Tuple[float, float, int, int] = (0.0, 0.1, 1500, 5000)  # [init, final, start, end]
+
+  eps: float = 1e-5
 
 @dataclass
-class RslRlBaseRunnerCfg:
+class B2Z1RslRlBaseRunnerCfg:
   seed: int = 42
   """The seed for the experiment. Default is 42."""
   num_steps_per_env: int = 24
@@ -119,11 +153,11 @@ class RslRlBaseRunnerCfg:
 
 
 @dataclass
-class RslRlOnPolicyRunnerCfg(RslRlBaseRunnerCfg):
+class B2Z1RslRlOnPolicyRunnerCfg(B2Z1RslRlBaseRunnerCfg):
   class_name: str = "OnPolicyRunner"
   """The runner class name. Default is OnPolicyRunner."""
-  actor: RslRlModelCfg = field(
-    default_factory=lambda: RslRlModelCfg(
+  actor: B2Z1RslRlModelCfg = field(
+    default_factory=lambda: B2Z1RslRlModelCfg(
       distribution_cfg={
         "class_name": "GaussianDistribution",
         "init_std": 1.0,
@@ -132,7 +166,7 @@ class RslRlOnPolicyRunnerCfg(RslRlBaseRunnerCfg):
     )
   )
   """The actor configuration."""
-  critic: RslRlModelCfg = field(default_factory=RslRlModelCfg)
+  critic: B2Z1RslRlModelCfg = field(default_factory=B2Z1RslRlModelCfg)
   """The critic configuration."""
-  algorithm: RslRlPpoAlgorithmCfg = field(default_factory=RslRlPpoAlgorithmCfg)
+  algorithm: B2Z1RslRlPpoAlgorithmCfg = field(default_factory=B2Z1RslRlPpoAlgorithmCfg)
   """The algorithm configuration."""
