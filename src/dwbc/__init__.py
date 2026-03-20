@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from mjlab.tasks.registry import register_mjlab_task
-from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner # TODO
+# from rl import B2Z1OnPolicyRunner # TODO
+from mjlab.rl import B2Z1OnPolicyRunner
 
 from dwbc.env_cfgs import make_b2z1_flat_env_cfg
 from dwbc.rl_cfg import b2z1_ppo_runner_cfg
@@ -13,5 +14,5 @@ register_mjlab_task(
   env_cfg=make_b2z1_flat_env_cfg(),
   play_env_cfg=make_b2z1_flat_env_cfg(),
   rl_cfg=b2z1_ppo_runner_cfg(),
-  runner_cls=VelocityOnPolicyRunner,
+  runner_cls=B2Z1OnPolicyRunner,
 )

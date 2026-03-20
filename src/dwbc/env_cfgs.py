@@ -6,8 +6,9 @@
 """Unitree B2Z1 velocity environment configurations."""
 
 import math
+from dataclasses import dataclass
 
-from mjlab.envs import ManagerBasedRlEnvCfg
+from mjlab.envs import ManagerBasedRlEnvCfg 
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.scene import SceneCfg
 from mjlab.terrains import TerrainEntityCfg
@@ -28,25 +29,25 @@ from dwbc.mdp.velocity_command import UniformVelocityCommandCfg
 from dwbc.mdp.pose_command import UniformPoseCommandCfg
 from dwbc.b2z1.b2z1_constants import B2Z1_ACTION_SCALE, get_b2z1_robot_cfg
 
-def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
+@dataclass(kw_only=True)
+class B2Z1RlEnvCfg(ManagerBasedRlEnvCfg):
+    num_history: int = 10 
+
+def make_b2z1_flat_env_cfg(num_history: int = 10) -> B2Z1RlEnvCfg:
   """Core configuration for B2Z1 flat ground walking."""
+
+  FOOT_GEOM_NAMES = ("FL_foot", "FR_foot", "RL_foot", "RR_foot")
 
   ##
   # Scene
   ##
   
-  FOOT_GEOM_NAMES = ("FL_foot", "FR_foot", "RL_foot", "RR_foot")
-
-
   scene = SceneCfg(
     num_envs=1,
     extent=2.0,
     terrain=TerrainEntityCfg(terrain_type="plane"),
-    entities={"robot": get_b2z1_robot_cfg()},    
-  )
-
-    # 足端接触传感器（检测脚与地面的接触力，用于计算空中时间）
-  feet_ground_cfg = ContactSensorCfg(
+    entities={"robot": get_b2z1_robot_cfg()}, 
+    sensors = (ContactSensorCfg(
       name="feet_ground_contact",
       primary=ContactMatch(
           mode="geom",
@@ -61,7 +62,12 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
       reduce="netforce",       # 每个足部所有接触点的合力
       num_slots=1,
       track_air_time=True,     # 开启空气时间追踪
+    ),
+    ),
   )
+
+    # 足端接触传感器（检测脚与地面的接触力，用于计算空中时间）
+  
 
   # 非足端接触传感器（检测除脚以外的其他部分是否触地）
   # nonfoot_ground_cfg = ContactSensorCfg(
@@ -83,15 +89,10 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
   #     num_slots=1,
   # )
 
-  # 将传感器添加到场景的 sensors 元组中
-  # 注意：SceneCfg 需要有 sensors 字段，如果没有则动态创建
-  if not hasattr(scene, "sensors"):
-      scene.sensors = ()
-  scene.sensors += (feet_ground_cfg, )
-      # 将传感器添加到场景，只保留足端传感器
-
-
-  viewer = ViewerConfig(
+  cfg = B2Z1RlEnvCfg(decimation=4, scene=scene,)
+  cfg.num_history = num_history
+  
+  cfg.viewer = ViewerConfig(
     origin_type=ViewerConfig.OriginType.ASSET_BODY,
     entity_name="robot",
     body_name="base_link",
@@ -100,7 +101,7 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
     azimuth=90.0,
   )
 
-  sim = SimulationCfg(
+  cfg.sim = SimulationCfg(
     nconmax=None,
     njmax=300,
     contact_sensor_maxmatch=64,
@@ -116,104 +117,114 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
   # Observations
   ##
 
+# 公共观测项（用于 actor/critic）
+  base_obs = {
+        "base_angular_velocity": ObservationTermCfg(
+            func=mdp.builtin_sensor,
+            params={"sensor_name": "robot/imu_ang_vel"},
+            history_length=10,
+        ),
+        "projected_gravity": ObservationTermCfg(
+            func=mdp.projected_gravity,
+            history_length=10,
+        ),
+        "joint_positions": ObservationTermCfg(
+            func=mdp.joint_pos_rel,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    joint_names=(
+                       ".*_hip_joint", ".*_thigh_joint", ".*_calf_joint",
+                       "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"
+                                 )
+                )
+            },
+            history_length=10,
+        ),
+        "joint_velocities": ObservationTermCfg(
+            func=mdp.joint_vel_rel,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    joint_names=(
+                       ".*_hip_joint", ".*_thigh_joint", ".*_calf_joint",
+                       "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"
+                       )
+                )
+            },
+            history_length=10,
+        ),
+        "actions": ObservationTermCfg(
+            func=mdp.last_action,
+            history_length=10,
+        ),
+               
+        "leg_commands": ObservationTermCfg(
+            func=mdp.generated_commands,
+            params={"command_name": "twist"},
+            history_length=10,
+        ),
+        "arm_pose_command": ObservationTermCfg(
+            func=mdp.generated_commands,
+            params={"command_name": "arm_pose"},
+            history_length=10,
+        ),
+    }
 
-  actor_terms = {
-      "base_linear_velocity": ObservationTermCfg(
+ 
+  priv_obs = {
+        "priv_mass_base": ObservationTermCfg(
+            func=mdp.body_mass,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names=["base_link"])},
+        ),
+        "priv_mass_ee": ObservationTermCfg(
+            func=mdp.body_mass,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names=["link06"]) },
+        ),
+        "priv_joint_torques": ObservationTermCfg(
+            func=mdp.joint_torques,
+            params={"asset_cfg": SceneEntityCfg("robot",joint_names=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint",  "joint1", "joint2", "joint3", "joint4", "joint5", "joint6" ]) },
+        ),
+        "priv_foot_contacts": ObservationTermCfg(
+          func=mdp.contact_sensor_field,
+          params={"sensor_name": "feet_ground_contact", "field": "found"},
+        ),
+
+        "priv_base_linear_velocity": ObservationTermCfg(
           func=mdp.builtin_sensor,
           params={"sensor_name": "robot/imu_lin_vel"},
-      ),
-      "base_angular_velocity": ObservationTermCfg(
-          func=mdp.builtin_sensor,
-          params={"sensor_name": "robot/imu_ang_vel"},
-      ),
-      "projected_gravity": ObservationTermCfg(
-          func=mdp.projected_gravity,
-      ),
-      "leg_joint_positions": ObservationTermCfg(
-          func=mdp.joint_pos_rel,
-          params={
-              "asset_cfg": SceneEntityCfg(
-                  "robot",
-                  joint_names=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint")
-              )
-          },
-      ),
-      "leg_joint_velocities": ObservationTermCfg(
-          func=mdp.joint_vel_rel,
-          params={
-              "asset_cfg": SceneEntityCfg(
-                  "robot",
-                  joint_names=(".*_hip_joint", ".*_thigh_joint", ".*_calf_joint")
-              )
-          },
-      ),
-      "actions": ObservationTermCfg(
-          func=mdp.last_action,
-      ),
-      "leg_commands": ObservationTermCfg(
-          func=mdp.generated_commands,
-          params={"command_name": "twist"},
-      ),
-      "arm_pose_command": ObservationTermCfg(
-          func=mdp.generated_commands,
-          params={"command_name": "arm_pose"},
-      ),
-      "arm_joint_positions": ObservationTermCfg(
-          func=mdp.joint_pos_rel,
-          params={
-              "asset_cfg": SceneEntityCfg(
-                  "robot",
-                  joint_names=["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
-              )
-          },
-      ),
-      "arm_joint_velocities": ObservationTermCfg(
-          func=mdp.joint_vel_rel,
-          params={
-              "asset_cfg": SceneEntityCfg(
-                  "robot",
-                  joint_names=["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
-              )
-          },
-      ),
-      # "foot_contacts": ObservationTermCfg(
-      #     func=mdp.sensor_data,
-      #     params={"sensor_name": "feet_ground_contact", "field": "found"},
-      # ),
-  }
-  
-  
-  critic_terms = {
-    **actor_terms,
-  }
+        ),
+    }
 
-  observations = {
-    "actor": ObservationGroupCfg(
-      terms=actor_terms,
-      concatenate_terms=True,
-      enable_corruption=True,
-    ),
-    "critic": ObservationGroupCfg(
-      terms=critic_terms,
-      concatenate_terms=True,
-      enable_corruption=False,
-    ),
-  }
+  cfg.observations = {
+        "actor": ObservationGroupCfg(
+            terms=base_obs,
+            concatenate_terms=True,
+            history_length=cfg.num_history,      # 启用历史堆叠 # TODO
+            flatten_history_dim=True,             # 展平为 [num_envs, num_prop * num_history]
+            enable_corruption=True,                # 训练时可加噪声
+        ),
+        "critic": ObservationGroupCfg(
+            terms=base_obs,   # TODO                     # critic 也可用相同观测（或包含特权）
+            concatenate_terms=True,
+            history_length=0,                       # critic 不需要历史
+            flatten_history_dim=False,
+            enable_corruption=False,
+        ),
+        "privileged": ObservationGroupCfg(
+            terms=priv_obs,
+            concatenate_terms=True,
+            history_length=0,
+            flatten_history_dim=False,
+            enable_corruption=False,
+        ),
+    }
 
   ##
   # Actions
   ##
-  # actions: dict[str, ActionTermCfg] = {
-  #   "joint_positions": JointPositionActionCfg(
-  #     entity_name="robot",
-  #     actuator_names=(".*",),
-  #     scale=B2Z1_ACTION_SCALE,
-  #     # scale=0.5,  # Override per-robot.
-  #     use_default_offset=True,
-  #   )
-  # }
 
-  actions: dict[str, ActionTermCfg] = {
+  cfg.actions = {
     "joint_positions": JointPositionActionCfg(
         entity_name="robot",
         actuator_names=(
@@ -235,7 +246,7 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
     )
   } 
 
-  joint_pos_action = actions["joint_positions"]
+  joint_pos_action = cfg.actions["joint_positions"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
   # joint_pos_action.scale = B2Z1_ACTION_SCALE
 
@@ -243,32 +254,33 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
   # Commands
   ##
 
-  commands: dict[str, CommandTermCfg] = {
+  cfg.commands = {
     # leg
     "twist": UniformVelocityCommandCfg(
       entity_name="robot",
       resampling_time_range=(3.0, 8.0),
-      is_B2Z1=True,  # 对应原代码的 is_Go2ARM=True
+      is_B2Z1=True,  
+      heading_command=True,  # 添加这一行
       curriculum_coeff=1000,
       ranges=UniformVelocityCommandCfg.Ranges(
         lin_vel_x=(0.2, 1.0), 
         lin_vel_y=(-0.5, 0.5), 
         ang_vel_z=(-0.5, 0.5),
-        heading=(-0.0, 0.0)
+        heading=(0.0, 0.0)
         ),
       
       ranges_final=UniformVelocityCommandCfg.Ranges(
           lin_vel_x=(0.1, 0.8), 
           lin_vel_y=(-0.5, 0.5), 
           ang_vel_z=(-0.5, 0.5),
-          heading=(-0.0, 0.0)
+          heading=(0.0, 0.0)
         ),
       
       ranges_init=UniformVelocityCommandCfg.Ranges(
           lin_vel_x=(0.1, 0.35), 
           lin_vel_y=(-0.1, 0.1), 
           ang_vel_z=(-0.1, 0.1),
-          heading=(-0.0, 0.0)
+          heading=(0.0, 0.0)
       )
     ),  
     # arm
@@ -276,7 +288,7 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
       entity_name="robot",
       body_name="link06",          
       resampling_time_range=(3.0, 8.0), 
-      is_B2Z1=True,  # 对应原代码的 is_Go2ARM=True
+      is_B2Z1=True,  
       curriculum_coeff=1000,   
 
       # 初始训练范围（简单）
@@ -317,7 +329,7 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
   ##
   # Rewards
   ##
-  rewards = {
+  cfg.rewards = {
     "track_linear_velocity": RewardTermCfg(
       func=mdp.track_linear_velocity, 
       weight=2.0,
@@ -539,8 +551,6 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
   }
 
 
-
-
   ##
   # Events
   ##
@@ -548,7 +558,7 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
   ##
   # Terminations
   ##
-  terminations = {
+  cfg.terminations = {
     "time_out": TerminationTermCfg(
       func=mdp.time_out, 
       time_out=True
@@ -559,15 +569,5 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
     )
   }
 
-  return ManagerBasedRlEnvCfg(
-    scene=scene,
-    observations=observations,
-    actions=actions,
-    sim=sim,
-    viewer=viewer,
-    rewards=rewards,
-    terminations=terminations,
-    commands=commands,
-    decimation=4,
-    episode_length_s=20.0,
-  )
+  cfg.episode_length_s = 20.0
+  return cfg
