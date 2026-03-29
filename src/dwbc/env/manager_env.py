@@ -18,6 +18,7 @@ class ManagerRLEnv(ManagerBasedRlEnv):
     **kwargs,
   ) -> None:
     super().__init__(cfg=cfg, device=device, render_mode=render_mode, **kwargs)
+    self.leg_reward_buf = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
     self.arm_reward_buf = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
   def load_managers(self):
@@ -44,6 +45,8 @@ class ManagerRLEnv(ManagerBasedRlEnv):
     self.reset_time_outs = self.termination_manager.time_outs
 
     self.reward_buf, self.arm_reward_buf = self.reward_manager.compute(dt=self.step_dt)
+    self.leg_reward_buf = self.reward_buf
+    total_rewards = self.leg_reward_buf + self.arm_reward_buf
     self.metrics_manager.compute()
 
     reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
@@ -63,11 +66,22 @@ class ManagerRLEnv(ManagerBasedRlEnv):
     self.sim.sense()
     self.obs_buf = self.observation_manager.compute(update_history=True)
 
+    self.extras["leg_rewards"] = self.leg_reward_buf.clone()
     self.extras["arm_rewards"] = self.arm_reward_buf.clone()
+    self.extras["total_rewards"] = total_rewards.clone()
+
+    log = self.extras.setdefault("log", {})
+    recompose_error = torch.abs(
+      self.extras["total_rewards"] - (self.extras["leg_rewards"] + self.extras["arm_rewards"])
+    )
+    log["Metrics/reward_leg_mean"] = torch.mean(self.extras["leg_rewards"])
+    log["Metrics/reward_arm_mean"] = torch.mean(self.extras["arm_rewards"])
+    log["Metrics/reward_total_mean"] = torch.mean(self.extras["total_rewards"])
+    log["Metrics/reward_recompose_error_mean"] = torch.mean(recompose_error)
 
     return (
       self.obs_buf,
-      self.reward_buf + self.arm_reward_buf,
+      total_rewards,
       self.reset_terminated,
       self.reset_time_outs,
       self.extras,

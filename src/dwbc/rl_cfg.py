@@ -20,12 +20,16 @@ class DwbcPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
 
   class_name: str = "dwbc.ppo:MixedPPO"
   mixing_schedule: tuple[float, int, int] | None = None
+  priv_reg_schedule: tuple[float, float, int, int] | None = None
+  headwise_policy_loss: bool = False
+  reward_debug: bool = True
 
 
 def b2z1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
   """Create RL runner configuration for Unitree B2Z1 velocity task."""
   return RslRlOnPolicyRunnerCfg(
     actor=RslRlModelCfg(
+      class_name="dwbc.models:DualHeadActorModel",
       hidden_dims=(512, 256, 128),
       activation="elu",
       obs_normalization=False,
@@ -36,6 +40,7 @@ def b2z1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       },
     ),
     critic=RslRlModelCfg(
+      class_name="dwbc.models:DualHeadCriticModel",
       hidden_dims=(512, 256, 128),
       activation="elu",
       obs_normalization=False,
@@ -54,7 +59,14 @@ def b2z1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       desired_kl=0.01,
       max_grad_norm=1.0,
       mixing_schedule=(1.0, 2000, 4000),
+      # mixing_schedule=(1.0, 200, 300),
+      headwise_policy_loss=True,
+      reward_debug=True,
     ),
+    obs_groups={
+      "actor": ("actor",),
+      "critic": ("critic",),
+    },
     experiment_name="b2z1_velocity",
     save_interval=50,
     num_steps_per_env=24,

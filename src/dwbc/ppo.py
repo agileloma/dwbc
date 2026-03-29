@@ -20,13 +20,36 @@ class MixedPPO(PPO):
     self,
     *args,
     mixing_schedule: tuple[float, int, int] | list[float] | None = None,
+    priv_reg_schedule: tuple[float, float, int, int] | list[float] | None = None,
+    headwise_policy_loss: bool = False,
     reward_dim: int = 1,
+    reward_debug: bool = True,
     **kwargs,
   ) -> None:
     super().__init__(*args, **kwargs)
     self.mixing_schedule = tuple(mixing_schedule) if mixing_schedule is not None else None
+    self.priv_reg_schedule = tuple(priv_reg_schedule) if priv_reg_schedule is not None else None
+    self.headwise_policy_loss = bool(headwise_policy_loss)
     self.reward_dim = reward_dim
+    self.reward_debug = reward_debug
+    self._reward_recompose_error_sum = 0.0
+    self._reward_recompose_error_count = 0
     self.counter = 0
+
+  def act(self, obs: TensorDict) -> torch.Tensor:
+    """Sample actions and store transition data."""
+    self.transition.hidden_states = (self.actor.get_hidden_state(), self.critic.get_hidden_state())
+    self.transition.actions = self.actor(obs, stochastic_output=True).detach()
+    self.transition.values = self.critic(obs).detach()
+    if self.headwise_policy_loss:
+      self.transition.actions_log_prob = self._compute_headwise_action_log_prob(
+        self.transition.actions
+      ).detach()
+    else:
+      self.transition.actions_log_prob = self.actor.get_output_log_prob(self.transition.actions).detach()  # type: ignore[arg-type]
+    self.transition.distribution_params = tuple(p.detach() for p in self.actor.output_distribution_params)
+    self.transition.observations = obs
+    return self.transition.actions  # type: ignore[return-value]
 
   def process_env_step(
     self,
@@ -41,6 +64,10 @@ class MixedPPO(PPO):
     if self.rnd:
       self.rnd.update_normalization(obs)
 
+    total_rewards = extras.get("total_rewards")
+    if total_rewards is not None:
+      total_rewards = total_rewards.to(self.device)
+
     arm_rewards = extras.get("arm_rewards")
     if arm_rewards is None:
       arm_rewards = torch.zeros_like(rewards)
@@ -51,9 +78,17 @@ class MixedPPO(PPO):
     # use explicit locomotion-vs-arm decomposition for two-headed value targets.
     leg_rewards = extras.get("leg_rewards")
     if leg_rewards is None:
-      leg_rewards = rewards - arm_rewards
+      if total_rewards is not None:
+        leg_rewards = total_rewards - arm_rewards
+      else:
+        leg_rewards = rewards - arm_rewards
     else:
       leg_rewards = leg_rewards.to(self.device)
+
+    if self.reward_debug and self.reward_dim > 1 and total_rewards is not None:
+      recompose_error = torch.mean(torch.abs(total_rewards - (leg_rewards + arm_rewards)))
+      self._reward_recompose_error_sum += float(recompose_error.item())
+      self._reward_recompose_error_count += 1
 
     if self.reward_dim > 1:
       reward_tensor = torch.stack([leg_rewards.clone(), arm_rewards.clone()], dim=-1)
@@ -88,6 +123,12 @@ class MixedPPO(PPO):
     mean_rnd_loss = 0.0 if self.rnd else None
     mean_symmetry_loss = 0.0 if self.symmetry else None
     mixing_ratio = self.get_value_mixing_ratio()
+    priv_reg_coef = self.get_priv_reg_coef()
+    track_priv_reg = (
+      hasattr(self.actor, "compute_privileged_history_reg_loss")
+      and bool(getattr(self.actor, "use_privileged_history_regularization", False))
+    )
+    mean_priv_reg_loss = 0.0 if track_priv_reg else None
 
     if self.actor.is_recurrent or self.critic.is_recurrent:
       generator = self.storage.recurrent_mini_batch_generator(
@@ -126,7 +167,10 @@ class MixedPPO(PPO):
         hidden_state=batch.hidden_states[0],
         stochastic_output=True,
       )
-      actions_log_prob = self.actor.get_output_log_prob(batch.actions)
+      if self.headwise_policy_loss:
+        actions_log_prob = self._compute_headwise_action_log_prob(batch.actions)
+      else:
+        actions_log_prob = self.actor.get_output_log_prob(batch.actions)
       values = self.critic(
         batch.observations,
         masks=batch.masks,
@@ -135,7 +179,10 @@ class MixedPPO(PPO):
       distribution_params = tuple(
         p[:original_batch_size] for p in self.actor.output_distribution_params
       )
-      entropy = self.actor.output_entropy[:original_batch_size]
+      if self.headwise_policy_loss:
+        entropy = self._compute_headwise_entropy(original_batch_size)
+      else:
+        entropy = self.actor.output_entropy[:original_batch_size]
 
       if self.desired_kl is not None and self.schedule == "adaptive":
         with torch.inference_mode():
@@ -164,9 +211,27 @@ class MixedPPO(PPO):
             param_group["lr"] = self.learning_rate
 
       mixed_advantages = self._mix_advantages(batch.advantages, mixing_ratio)
-      ratio = torch.exp(actions_log_prob - torch.squeeze(batch.old_actions_log_prob))
-      if mixed_advantages.ndim > ratio.ndim:
-        ratio = ratio.unsqueeze(-1)
+      if self.headwise_policy_loss:
+        if batch.old_actions_log_prob.shape[-1] != 2:
+          raise RuntimeError(
+            "headwise_policy_loss=True requires old_actions_log_prob with shape [..., 2]. "
+            f"Got {batch.old_actions_log_prob.shape}."
+          )
+        if mixed_advantages.shape[-1] != 2:
+          raise RuntimeError(
+            "headwise_policy_loss=True requires mixed advantages with shape [..., 2]. "
+            f"Got {mixed_advantages.shape}."
+          )
+        ratio = torch.exp(actions_log_prob - batch.old_actions_log_prob)
+        if ratio.shape != mixed_advantages.shape:
+          raise RuntimeError(
+            "Headwise ratio shape must match mixed advantages shape. "
+            f"Got ratio={ratio.shape}, mixed_advantages={mixed_advantages.shape}."
+          )
+      else:
+        ratio = torch.exp(actions_log_prob - torch.squeeze(batch.old_actions_log_prob))
+        if mixed_advantages.ndim > ratio.ndim:
+          ratio = ratio.unsqueeze(-1)
       surrogate = -mixed_advantages * ratio
       surrogate_clipped = -mixed_advantages * torch.clamp(
         ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
@@ -184,6 +249,15 @@ class MixedPPO(PPO):
         value_loss = (batch.returns - values).pow(2).mean()
 
       loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy.mean()
+
+      if track_priv_reg:
+        priv_reg_loss = self.actor.compute_privileged_history_reg_loss(  # type: ignore[attr-defined]
+          batch.observations, masks=batch.masks
+        )
+        if priv_reg_coef != 0.0:
+          loss = loss + priv_reg_coef * priv_reg_loss
+      else:
+        priv_reg_loss = None
 
       if self.symmetry:
         if not self.symmetry["use_data_augmentation"]:
@@ -238,6 +312,8 @@ class MixedPPO(PPO):
         mean_rnd_loss += rnd_loss.item()
       if mean_symmetry_loss is not None:
         mean_symmetry_loss += symmetry_loss.item()
+      if mean_priv_reg_loss is not None and priv_reg_loss is not None:
+        mean_priv_reg_loss += priv_reg_loss.item()
 
     num_updates = self.num_learning_epochs * self.num_mini_batches
     mean_value_loss /= num_updates
@@ -247,6 +323,8 @@ class MixedPPO(PPO):
       mean_rnd_loss /= num_updates
     if mean_symmetry_loss is not None:
       mean_symmetry_loss /= num_updates
+    if mean_priv_reg_loss is not None:
+      mean_priv_reg_loss /= num_updates
 
     self.storage.clear()
     self.update_counter()
@@ -257,10 +335,19 @@ class MixedPPO(PPO):
       "entropy": mean_entropy,
       "mixing_ratio": mixing_ratio,
     }
+    if self.reward_debug and self._reward_recompose_error_count > 0:
+      loss_dict["reward_recompose_error"] = (
+        self._reward_recompose_error_sum / self._reward_recompose_error_count
+      )
+      self._reward_recompose_error_sum = 0.0
+      self._reward_recompose_error_count = 0
     if self.rnd:
       loss_dict["rnd"] = mean_rnd_loss
     if self.symmetry:
       loss_dict["symmetry"] = mean_symmetry_loss
+    if mean_priv_reg_loss is not None:
+      loss_dict["priv_reg_loss"] = mean_priv_reg_loss
+      loss_dict["priv_reg_coef"] = priv_reg_coef
     return loss_dict
 
   def save(self) -> dict:
@@ -286,6 +373,57 @@ class MixedPPO(PPO):
 
     stage = min(max((self.counter - warmup_start) / warmup_duration, 0.0), 1.0)
     return float(stage * target_ratio)
+
+  def get_priv_reg_coef(self) -> float:
+    if self.priv_reg_schedule is None:
+      return 0.0
+
+    start_coef, target_coef, warmup_start, warmup_duration = self.priv_reg_schedule
+    if self.counter < warmup_start:
+      return float(start_coef)
+    if warmup_duration <= 0:
+      return float(target_coef)
+
+    stage = min(max((self.counter - warmup_start) / warmup_duration, 0.0), 1.0)
+    return float(start_coef + stage * (target_coef - start_coef))
+
+  def _get_action_head_dims(self) -> tuple[int, int]:
+    leg_dim = getattr(self.actor, "leg_action_dim", None)
+    arm_dim = getattr(self.actor, "arm_action_dim", None)
+    if leg_dim is None or arm_dim is None:
+      raise RuntimeError(
+        "headwise_policy_loss=True requires actor to expose leg_action_dim and arm_action_dim."
+      )
+    leg_dim = int(leg_dim)
+    arm_dim = int(arm_dim)
+    if leg_dim <= 0 or arm_dim <= 0:
+      raise RuntimeError(
+        f"Invalid action head dims: leg_action_dim={leg_dim}, arm_action_dim={arm_dim}."
+      )
+    return leg_dim, arm_dim
+
+  def _compute_headwise_action_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
+    mean, std = self.actor.output_distribution_params
+    leg_dim, arm_dim = self._get_action_head_dims()
+    if mean.shape[-1] != leg_dim + arm_dim:
+      raise RuntimeError(
+        "Actor distribution dimension does not match leg/arm action dims. "
+        f"mean_dim={mean.shape[-1]}, leg+arm={leg_dim + arm_dim}."
+      )
+    log_prob = torch.distributions.Normal(mean, std).log_prob(actions)
+    leg_log_prob = log_prob[..., :leg_dim].sum(dim=-1, keepdim=True)
+    arm_log_prob = log_prob[..., leg_dim:].sum(dim=-1, keepdim=True)
+    return torch.cat([leg_log_prob, arm_log_prob], dim=-1)
+
+  def _compute_headwise_entropy(self, original_batch_size: int) -> torch.Tensor:
+    mean, std = self.actor.output_distribution_params
+    mean = mean[:original_batch_size]
+    std = std[:original_batch_size]
+    leg_dim, arm_dim = self._get_action_head_dims()
+    entropy = torch.distributions.Normal(mean, std).entropy()
+    leg_entropy = entropy[..., :leg_dim].sum(dim=-1, keepdim=True)
+    arm_entropy = entropy[..., leg_dim:].sum(dim=-1, keepdim=True)
+    return torch.cat([leg_entropy, arm_entropy], dim=-1)
 
   def _mix_advantages(
     self,
@@ -316,6 +454,12 @@ class MixedPPO(PPO):
     cfg["algorithm"] = resolve_symmetry_config(cfg["algorithm"], env)
 
     reward_dim = 2 if cfg["algorithm"].get("mixing_schedule") is not None else 1
+    headwise_policy_loss = bool(cfg["algorithm"].get("headwise_policy_loss", False))
+    if headwise_policy_loss and reward_dim != 2:
+      raise ValueError(
+        "headwise_policy_loss=True requires reward_dim=2 (enable mixing_schedule)."
+      )
+    log_prob_dim = 2 if headwise_policy_loss else 1
 
     actor: MLPModel = actor_class(
       obs, cfg["obs_groups"], "actor", env.num_actions, **cfg["actor"]
@@ -337,6 +481,7 @@ class MixedPPO(PPO):
       obs,
       [env.num_actions],
       reward_dim=reward_dim,
+      log_prob_dim=log_prob_dim,
       device=device,
     )
 

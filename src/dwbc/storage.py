@@ -17,9 +17,11 @@ class MultiRewardRolloutStorage(RolloutStorage):
     obs: TensorDict,
     actions_shape: tuple[int, ...] | list[int],
     reward_dim: int = 1,
+    log_prob_dim: int = 1,
     device: str = "cpu",
   ) -> None:
     self.reward_dim = reward_dim
+    self.log_prob_dim = log_prob_dim
     super().__init__(
       training_type=training_type,
       num_envs=num_envs,
@@ -35,6 +37,9 @@ class MultiRewardRolloutStorage(RolloutStorage):
     if training_type == "rl":
       self.values = torch.zeros(
         num_transitions_per_env, num_envs, reward_dim, device=self.device
+      )
+      self.actions_log_prob = torch.zeros(
+        num_transitions_per_env, num_envs, log_prob_dim, device=self.device
       )
       self.returns = torch.zeros(
         num_transitions_per_env, num_envs, reward_dim, device=self.device
@@ -58,7 +63,9 @@ class MultiRewardRolloutStorage(RolloutStorage):
 
     if self.training_type == "rl":
       self.values[self.step].copy_(transition.values)  # type: ignore[arg-type]
-      self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))  # type: ignore[union-attr]
+      self.actions_log_prob[self.step].copy_(
+        transition.actions_log_prob.view(-1, self.log_prob_dim)  # type: ignore[union-attr]
+      )
       if self.distribution_params is None:
         self.distribution_params = tuple(
           torch.zeros(self.num_transitions_per_env, *p.shape, device=self.device)
