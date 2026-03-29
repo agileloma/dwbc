@@ -5,11 +5,21 @@
 
 """RL configuration for Unitree B2Z1 velocity task."""
 
+from dataclasses import dataclass
+
 from mjlab.rl import (
   RslRlModelCfg,
   RslRlOnPolicyRunnerCfg,
   RslRlPpoAlgorithmCfg,
 )
+
+
+@dataclass
+class DwbcPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
+  """Project PPO config with optional advantage mixing."""
+
+  class_name: str = "dwbc.ppo:MixedPPO"
+  mixing_schedule: tuple[float, int, int] | None = None
 
 
 def b2z1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
@@ -30,7 +40,7 @@ def b2z1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       activation="elu",
       obs_normalization=False,
     ),
-    algorithm=RslRlPpoAlgorithmCfg(
+    algorithm=DwbcPpoAlgorithmCfg(
       value_loss_coef=1.0,
       use_clipped_value_loss=True,
       clip_param=0.2,
@@ -43,6 +53,7 @@ def b2z1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       lam=0.95,
       desired_kl=0.01,
       max_grad_norm=1.0,
+      mixing_schedule=(1.0, 2000, 4000),
     ),
     experiment_name="b2z1_velocity",
     save_interval=50,

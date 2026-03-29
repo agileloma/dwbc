@@ -254,21 +254,18 @@ def make_b2z1_flat_env_cfg() -> ManagerBasedRlEnvCfg:
         lin_vel_x=(0.2, 1.0), 
         lin_vel_y=(-0.5, 0.5), 
         ang_vel_z=(-0.5, 0.5),
-        heading=(-0.0, 0.0)
         ),
       
       ranges_final=UniformVelocityCommandCfg.Ranges(
           lin_vel_x=(0.1, 0.8), 
           lin_vel_y=(-0.5, 0.5), 
           ang_vel_z=(-0.5, 0.5),
-          heading=(-0.0, 0.0)
         ),
       
       ranges_init=UniformVelocityCommandCfg.Ranges(
           lin_vel_x=(0.1, 0.35), 
           lin_vel_y=(-0.1, 0.1), 
           ang_vel_z=(-0.1, 0.1),
-          heading=(-0.0, 0.0)
       )
     ),  
     # arm
